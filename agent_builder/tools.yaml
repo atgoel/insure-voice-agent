@@ -1,0 +1,102 @@
+openapi: "3.0.0"
+info:
+  title: InsureVoice Cloud Function Tools
+  version: "1.0"
+  description: OpenAPI specs for Agent Builder tool registration
+
+paths:
+  /compliance_check:
+    post:
+      operationId: compliance_check
+      summary: Check compliance eligibility of candidate products against a customer profile
+      description: >
+        Applies deterministic compliance rules to filter out insurance products that
+        the customer is ineligible for. Returns passed and rejected products with reasons.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [candidate_products, customer_profile]
+              properties:
+                candidate_products:
+                  type: array
+                  description: List of product objects returned by the search agent
+                  items:
+                    type: object
+                customer_profile:
+                  type: object
+                  description: Structured customer profile extracted from voice input
+                  properties:
+                    age:          { type: integer, description: "Customer age in years" }
+                    income:       { type: integer, description: "Annual income in INR" }
+                    smoker:       { type: boolean, description: "Whether the customer is a smoker" }
+                    health_status:{ type: string, enum: [healthy, pre_existing], description: "Declared health status" }
+                    sum_need:     { type: integer, description: "Desired sum assured in INR" }
+      responses:
+        "200":
+          description: Compliance check result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  passed:
+                    type: array
+                    description: Products that passed all compliance rules
+                    items: { type: object }
+                  rejected:
+                    type: array
+                    description: Products that failed at least one compliance rule
+                    items:
+                      type: object
+                      properties:
+                        product_id:   { type: string }
+                        product_name: { type: string }
+                        reasons:      { type: array, items: { type: string } }
+
+  /rank_products:
+    post:
+      operationId: rank_products
+      summary: Score and rank compliance-passed products by customer suitability
+      description: >
+        Applies a weighted scoring formula (ELSER relevance + age centrality + income fit)
+        to rank the top 3 most suitable insurance products for a customer profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [passed_products, customer_profile]
+              properties:
+                passed_products:
+                  type: array
+                  description: Compliance-passed products from compliance_check
+                  items: { type: object }
+                customer_profile:
+                  type: object
+                  description: Structured customer profile
+                  properties:
+                    age:    { type: integer }
+                    income: { type: integer }
+                    sum_need: { type: integer }
+      responses:
+        "200":
+          description: Ranked top-3 products
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  top3:
+                    type: array
+                    maxItems: 3
+                    items:
+                      type: object
+                      properties:
+                        rank:             { type: integer }
+                        product:          { type: object }
+                        suitability_score:{ type: number }
+                        score_breakdown:  { type: object }

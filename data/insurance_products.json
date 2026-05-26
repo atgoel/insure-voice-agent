@@ -1,0 +1,4 @@
+# Insurance Product Catalog
+# This file will contain 25–30 synthetic insurance products for Elasticsearch ingestion.
+# Run ingest/index_products.py to load this into Elasticsearch.
+[]

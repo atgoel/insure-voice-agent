@@ -1,0 +1,35 @@
+# Cloud Build CI/CD Pipeline — InsureVoice
+steps:
+  # Step 1: Deploy compliance_check Cloud Function
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - functions
+      - deploy
+      - compliance_check
+      - --runtime=python311
+      - --trigger-http
+      - --allow-unauthenticated
+      - --source=functions/compliance_check
+      - --entry-point=compliance_check
+      - --region=${_REGION}
+
+  # Step 2: Deploy rank_products Cloud Function
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - functions
+      - deploy
+      - rank_products
+      - --runtime=python311
+      - --trigger-http
+      - --allow-unauthenticated
+      - --source=functions/rank_products
+      - --entry-point=rank_products
+      - --region=${_REGION}
+
+substitutions:
+  _REGION: us-central1
+
+options:
+  logging: CLOUD_LOGGING_ONLY
