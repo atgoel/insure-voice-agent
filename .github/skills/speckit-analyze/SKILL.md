@@ -1,7 +1,6 @@
 ---
 name: speckit-analyze
 description: "Non-destructive consistency check across spec.md, plan.md, and tasks.md. Identifies misalignments, gaps, and constitution violations. Run after /speckit-tasks before implementing."
-mode: speckit.analyze
 argument-hint: "Optional: focus area (e.g., 'compliance', 'latency', 'test coverage')"
 ---
 

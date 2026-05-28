@@ -1,7 +1,6 @@
 ---
 name: speckit-clarify
 description: "Ask up to 5 targeted clarification questions about the current spec and encode answers back into spec.md. Run before /speckit-plan to reduce ambiguity."
-mode: speckit.clarify
 argument-hint: "Optional: specific area to clarify (e.g., 'compliance rules', 'voice format')"
 ---
 

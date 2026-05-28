@@ -54,10 +54,23 @@ def create_index():
         body={
             "mappings": {
                 "properties": {
+                    # Identity & codes
                     "id":                     {"type": "keyword"},
+                    "product_code":           {"type": "keyword"},
                     "name":                   {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
                     "product_type":           {"type": "keyword"},
+                    "plan_category":          {"type": "keyword"},
+                    "uin":                    {"type": "keyword"},
+                    # ELSER semantic field
                     "description":            {"type": "semantic_text", "inference_id": INFERENCE_ID},
+                    # Marketing fields
+                    "key_feature":            {"type": "text"},
+                    "sales_pitch":            {"type": "text"},
+                    "tags":                   {"type": "keyword"},
+                    # Rider (optional)
+                    "rider_name":             {"type": "keyword"},
+                    "rider_type":             {"type": "keyword"},
+                    # Eligibility constraints
                     "min_age":                {"type": "integer"},
                     "max_age":                {"type": "integer"},
                     "smoker_eligible":        {"type": "boolean"},
@@ -65,9 +78,11 @@ def create_index():
                     "max_sum_assured":        {"type": "long"},
                     "medical_required_above": {"type": "long"},
                     "exclusions":             {"type": "keyword"},
-                    "coverage_type":          {"type": "keyword"},
+                    # Premium
                     "premium_min_monthly":    {"type": "integer"},
-                    "premium_max_monthly":    {"type": "integer"}
+                    "premium_max_monthly":    {"type": "integer"},
+                    # Lifecycle
+                    "is_active":              {"type": "boolean"},
                 }
             }
         }

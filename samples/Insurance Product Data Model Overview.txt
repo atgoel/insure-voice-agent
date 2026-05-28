@@ -1,0 +1,490 @@
+Insurance Product Data Model Overview 
+The system manages: 
+• Insurance product master information  
+• Product code mappings  
+• UIN lifecycle management  
+• Product activation and expiry  
+• Riders and plan categories  
+• Product metadata and marketing information  
+ 
+2. Logical Data Model 
++--------------------------------------------------+ 
+|                  tblProducts                     | 
++--------------------------------------------------+ 
+| PK  intProductId                                 | 
+|     intProductCode                               | 
+|     vcFGProductCode                              | 
+|     vcNVESTProductCode                           | 
+|     intFormSeriesId                              | 
+|     vcProductType                                | 
+|     vcProductTitle                               | 
+|     vcRiderCode                                  | 
+|     vcRiderType                                  | 
+|     vcRiderName                                  | 
+|     vcKeyFeature                                 | 
+|     vcEBrochure                                  | 
+|     vcSalesPitch                                 | 
+|     vcTags                                       | 
+|     vcCourseType                                 | 
+|     vcDocumentId                                 | 
+|     btCisEligible                                | 
+|     VcPlanCategory                               | 
+|     BitIsDeleted                                 | 
++--------------------------------------------------+ 
+                    | 
+                    | 
+                    | vcNVESTProductCode 
+                    | 
+                    V 
++--------------------------------------------------+ 
+|          M_PHUB_UINCHANGEPRODUCTS                | 
++--------------------------------------------------+ 
+| PK  intId                                        | 
+|     vcProductCode                                | 
+|     vcNvestProductCode                           | 
+|     vcProductName                                | 
+|     vcUIN                                        | 
+|     dtProductActivationDate                      | 
+|     dtProductExpiryDate                          | 
+|     btIsActive                                   | 
+|     btIsDeleted                                  | 
++--------------------------------------------------+ 
+ 
+3. Relationship Between Tables 
+Relationship Type 
+One Product -> Multiple UIN Records 
+Join Condition 
+tblProducts.vcNVESTProductCode 
+= 
+M_PHUB_UINCHANGEPRODUCTS.vcNvestProductCode 
+ 
+4. Business Flow 
+Step 1 — Product Creation 
+Product is created in: 
+tblProducts 
+Contains: 
+• Product name  
+• Product type  
+• Rider details  
+• Marketing data  
+Step 2 — Regulatory Approval 
+UIN details are stored in: 
+M_PHUB_UINCHANGEPRODUCTS 
+Contains: 
+• UIN number  
+• Activation date  
+• Expiry date  
+• Active status  
+Step 3 — Product Activation 
+btIsActive = 1 
+Product becomes available for: 
+• Sales  
+• Policy issuance  
+• Distribution  
+Step 4 — Product Expiry / Withdrawal 
+btIsActive = 0 
+Product becomes inactive. 
+5. Sample Insurance Products 
+Sample Data — tblProducts 
+intProductId vcProductTitle vcProductType VcPlanCategory vcRiderName 
+1 Future Secure 
+Term Plan Term Insurance Protection Accidental 
+Death Benefit 
+2 Wealth Builder 
+Plus ULIP Investment Critical Illness 
+Rider 
+3 
+Smart 
+Retirement 
+Plan 
+Pension Plan Retirement Waiver of 
+Premium 
+4 Child Future 
+Saver Savings Plan Savings Premium 
+Waiver Rider 
+ 
+6. Sample UIN Data 
+Sample Data — M_PHUB_UINCHANGEPRODUCTS 
+intId vcProductName vcUIN Activation 
+Date 
+Expiry 
+Date Active 
+1 Future Secure 
+Term Plan 123N456V01 2025-01-01 2030-12
+31 1 
+2 Wealth Builder 
+Plus 456N789V02 2024-04-01 2029-03
+31 1 
+3 Smart 
+Retirement Plan 987N654V01 2023-06-01 2028-05
+31 1 
+4 Child Future 
+Saver 741N852V03 2022-01-01 2026-12
+31 0 
+ 
+7. Sample Insert Statements 
+tblProducts Sample Insert 
+INSERT INTO tblProducts 
+( 
+    intProductCode, 
+    vcFGProductCode, 
+    intFormSeriesId, 
+    vcNVESTProductCode, 
+    vcProductType, 
+    vcProductTitle, 
+    vcRiderCode, 
+    vcRiderType, 
+    vcRiderName, 
+    vcKeyFeature, 
+    vcSalesPitch, 
+    vcTags, 
+    vcCourseType, 
+    vcDocumentId, 
+    vcLastAccessIP, 
+    vcCreatedBy, 
+    dtCreateDate, 
+    btCisEligible, 
+    VcPlanCategory 
+) 
+VALUES 
+( 
+    101, 
+    'FG_TERM_001', 
+    1, 
+    'NV_TERM_001', 
+    'Term Insurance', 
+    'Future Secure Term Plan', 
+    'RID001', 
+    'Accidental', 
+    'Accidental Death Benefit', 
+    'High life cover', 
+    'Affordable protection plan', 
+    'term,protection', 
+    'Insurance Basics', 
+    'DOC001', 
+    '10.10.1.1', 
+    'admin', 
+    GETDATE(), 
+    1, 
+    'Protection' 
+); 
+ 
+M_PHUB_UINCHANGEPRODUCTS Sample Insert 
+INSERT INTO M_PHUB_UINCHANGEPRODUCTS 
+( 
+    vcProductCode, 
+    vcNvestProductCode, 
+    vcProductName, 
+    dtProductActivationDate, 
+    dtProductExpiryDate, 
+    vcUIN, 
+    btIsActive, 
+    vcCreatedBy, 
+    dtCreatedDate, 
+    btIsDeleted 
+) 
+VALUES 
+( 
+    'FG_TERM_001', 
+    'NV_TERM_001', 
+    'Future Secure Term Plan', 
+    '2025-01-01', 
+    '2030-12-31', 
+    '123N456V01', 
+    1, 
+    'admin', 
+    GETDATE(), 
+    0 
+); 
+ 
+8. Sample Business Queries 
+Fetch Active Insurance Products 
+SELECT 
+    p.vcProductTitle, 
+    p.vcProductType, 
+    p.VcPlanCategory, 
+    u.vcUIN, 
+    u.dtProductActivationDate, 
+    u.dtProductExpiryDate 
+FROM tblProducts p 
+INNER JOIN M_PHUB_UINCHANGEPRODUCTS u 
+ON p.vcNVESTProductCode = u.vcNvestProductCode 
+WHERE u.btIsActive = 1 
+AND u.btIsDeleted = 0; 
+ 
+Fetch Products Expiring Soon 
+SELECT 
+    vcProductName, 
+    vcUIN, 
+    dtProductExpiryDate 
+FROM M_PHUB_UINCHANGEPRODUCTS 
+WHERE dtProductExpiryDate <= DATEADD(DAY,30,GETDATE()); 
+ 
+Fetch Products By Category 
+SELECT 
+    vcProductTitle, 
+    vcProductType, 
+    VcPlanCategory 
+FROM tblProducts 
+WHERE VcPlanCategory = 'Protection'; 
+ 
+Table 1: tblProducts 
+This is the main insurance product master table. 
+CREATE TABLE [dbo].[tblProducts] 
+( 
+    [intProductId] [int] IDENTITY(1,1) NOT NULL, 
+    [intProductCode] [int] NOT NULL, 
+    [vcFGProductCode] nvarchar NOT NULL, 
+    [intFormSeriesId] [int] NOT NULL, 
+    [vcNVESTProductCode] nvarchar NOT NULL, 
+    [vcProductType] nvarchar NOT NULL, 
+    [vcProductTitle] nvarchar NOT NULL, 
+    [vcRiderCode] nvarchar NULL, 
+    [vcRiderType] nvarchar NULL, 
+    [vcRiderName] nvarchar NULL, 
+    [vcKeyFeature] nvarchar NULL, 
+    [vcEBrochure] nvarchar NULL, 
+    [vcSalesPitch] nvarchar NULL, 
+    [vcTags] nvarchar NULL, 
+    [vcCourseType] nvarchar NULL, 
+    [vcDocumentId] nvarchar NULL, 
+    [vcLastAccessIP] nvarchar NOT NULL, 
+    [vcCreatedBy] nvarchar NOT NULL, 
+    [dtCreateDate] datetime2 NOT NULL, 
+    [vcModifiedBy] nvarchar NULL, 
+    [dtModifiedDate] datetime2 NULL, 
+    [dtDeletedDate] datetime2 NULL, 
+    [BitIsDeleted] [bit] NULL, 
+    [btCisEligible] [bit] NULL, 
+    [VcPlanCategory] varchar NULL, 
+ 
+    CONSTRAINT [PK_tblProducts2] 
+    PRIMARY KEY CLUSTERED 
+    ( 
+        [intProductId] ASC 
+    ) 
+    WITH 
+    ( 
+        PAD_INDEX = OFF, 
+        STATISTICS_NORECOMPUTE = OFF, 
+        IGNORE_DUP_KEY = OFF, 
+        ALLOW_ROW_LOCKS = ON, 
+        ALLOW_PAGE_LOCKS = ON, 
+        OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF 
+    ) ON [PRIMARY] 
+) ON [PRIMARY] 
+GO 
+ 
+It Stores 
+• Product details  
+• Product type  
+• Rider information  
+• Marketing content  
+• Product metadata  
+ 
+Purpose of tblProducts 
+This table acts as: 
+Master Catalog of Insurance Products 
+Example Products 
+• Term Insurance  
+• ULIP  
+• Savings Plan  
+• Pension Plan  
+• Riders  
+ 
+Structure Explanation 
+Primary Key 
+intProductId 
+• Unique internal system ID  
+• Auto-generated identity column  
+Example 
+intProductId Product 
+1 Smart Term Plan 
+2 Wealth Builder 
+ 
+Important Columns 
+Product Identification 
+Column Meaning 
+intProductCode Internal product numeric code 
+vcFGProductCode 
+vcNVESTProductCode 
+Example 
+FG_TERM_001 
+NV_TERM_001 
+FG system product code 
+NVEST system product code 
+This shows the same product in different systems. 
+Product Information 
+Column 
+vcProductType 
+Meaning 
+Product category 
+vcProductTitle 
+Example 
+vcProductType 
+Term Insurance 
+Rider Information 
+Riders are optional add-on benefits. 
+Column 
+vcRiderCode 
+vcRiderType 
+vcRiderName 
+Example Riders 
+• Accidental Death Benefit  
+• Critical Illness Rider  
+Marketing Information 
+Column 
+vcKeyFeature 
+vcEBrochure 
+vcSalesPitch 
+vcTags 
+Product display name 
+vcProductTitle 
+Future Secure Term Plan 
+Meaning 
+Rider identifier 
+Type of rider 
+Rider display name 
+Main features 
+Meaning 
+Brochure URL/document 
+Sales description 
+Search keywords 
+Example 
+High life cover with affordable premium 
+Training / Learning 
+Column 
+vcCourseType 
+Meaning 
+Training/course category 
+Used In 
+• LMS systems  
+• Agent training portals  
+Audit Columns 
+vcCreatedBy 
+dtCreateDate 
+vcModifiedBy 
+dtModifiedDate 
+Column 
+Soft Delete Columns 
+Column 
+BitIsDeleted 
+dtDeletedDate 
+Instead of physically deleting records: 
+• System marks them deleted  
+Business Flags 
+btCisEligible 
+VcPlanCategory 
+Column 
+Example Categories 
+• Protection  
+• Savings  
+Meaning 
+User who created 
+Creation date 
+Last updated by 
+Last modified date 
+Meaning 
+Logical delete flag 
+Deletion timestamp 
+Meaning 
+CIS eligibility 
+Product category 
+• Retirement  
+• ULIP  
+ 
+Business Meaning of tblProducts 
+This table answers: 
+“What insurance products exist in the organization?” 
+ 
+ 
+Table 2: M_PHUB_UINCHANGEPRODUCTS 
+This table manages: 
+Product UIN and lifecycle tracking 
+CREATE TABLE [dbo].[M_PHUB_UINCHANGEPRODUCTS] 
+( 
+    [intId] [int] IDENTITY(1,1) NOT NULL, 
+    [vcProductCode] varchar NULL, 
+    [vcNvestProductCode] varchar NULL, 
+    [vcProductName] varchar NULL, 
+    [dtProductActivationDate] [datetime] NULL, 
+    [dtProductExpiryDate] [datetime] NULL, 
+    [vcUIN] nvarchar NULL, 
+    [btIsActive] [bit] NULL, 
+    [vcCreatedBy] varchar NULL, 
+    [dtCreatedDate] [datetime] NULL, 
+    [vcModifiedBy] varchar NULL, 
+    [dtModifiedDate] [datetime] NULL, 
+    [btIsDeleted] [bit] NULL, 
+    [dtDeletedDate] [datetime] NULL, 
+ 
+    PRIMARY KEY CLUSTERED 
+    ( 
+        [intId] ASC 
+    ) 
+    WITH 
+    ( 
+        PAD_INDEX = OFF, 
+        STATISTICS_NORECOMPUTE = OFF, 
+        IGNORE_DUP_KEY = OFF, 
+        ALLOW_ROW_LOCKS = ON, 
+        ALLOW_PAGE_LOCKS = ON, 
+        OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF 
+    ) ON [PRIMARY] 
+) ON [PRIMARY] 
+ 
+Purpose of this Table 
+Insurance companies in India use: 
+UIN (Unique Identification Number) 
+Issued by: 
+• Insurance Regulatory and Development Authority of India  
+Each approved insurance product gets: 
+• UIN number  
+• Approval lifecycle  
+• Validity dates  
+This table stores: 
+• UIN mapping  
+• Active/inactive status  
+• Activation/expiry dates  
+ 
+Structure Explanation 
+Primary Key 
+intId 
+• Unique record ID  
+ 
+Product Mapping Columns 
+Column Meaning 
+vcProductCode Product code 
+vcNvestProductCode NVEST mapping 
+vcProductName Product display name 
+ 
+UIN Information 
+Column Meaning 
+vcUIN Regulatory UIN number 
+Example 
+123N456V01 
+ 
+Product Lifecycle 
+Column Meaning 
+dtProductActivationDate Start date 
+dtProductExpiryDate Expiry date 
+Used For 
+• Product launches  
+• Discontinued products  
+• Version control  
+ 
+Product Status 
+Column Meaning 
+btIsActive Active product flag 
+Example 
+Value Meaning 
+1 Active 
+0 Inactive 
+ 
+Audit Columns 
+Tracks: 
+• Creation  
+• Modification  
+• Deletion history  
+Same pattern as master table. 
+ 

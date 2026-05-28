@@ -1,7 +1,6 @@
 ---
 name: speckit-checklist
 description: "Generate a domain-specific requirements quality checklist for the current spec. Validates completeness, clarity, and consistency of the spec — not the implementation. Run before /speckit-plan."
-mode: speckit.checklist
 argument-hint: "Domain focus for the checklist (e.g., 'compliance', 'voice UX', 'search accuracy', 'agent orchestration')"
 ---
 

@@ -1,7 +1,6 @@
 ---
 name: speckit-tasks
 description: "Generate an actionable, dependency-ordered tasks.md for a feature. Run after /speckit-plan. Produces specs/NNN-<feature>/tasks.md with phased implementation tasks."
-mode: speckit.tasks
 argument-hint: "Optional: scope or constraint notes (e.g., 'MVP only', 'skip voice layer')"
 ---
 

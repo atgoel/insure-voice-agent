@@ -1,7 +1,6 @@
 ---
 name: speckit-specify
 description: "Create or update a feature specification from a natural language description. USE FOR: defining new features, user stories, acceptance criteria, and edge cases. Writes specs/NNN-<feature-name>/spec.md. Run this first before plan or tasks."
-mode: speckit.specify
 argument-hint: "Natural language description of the feature to specify"
 ---
 

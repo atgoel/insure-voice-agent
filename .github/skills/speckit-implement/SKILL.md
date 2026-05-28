@@ -1,7 +1,6 @@
 ---
 name: speckit-implement
 description: "Execute the implementation plan by working through tasks.md phase by phase. Writes actual code. Run after /speckit-tasks. Stops at incomplete checklists."
-mode: speckit.implement
 argument-hint: "Optional: phase to start from (e.g., 'Phase 2'), or 'all' for everything"
 ---
 
