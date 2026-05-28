@@ -14,7 +14,8 @@ from elasticsearch.helpers import bulk
 
 ES_URL = os.environ["ES_URL"]
 ES_API_KEY = os.environ["ES_API_KEY"]
-INDEX_NAME = "insurance_products"
+# Write via alias so ingests work transparently across index version upgrades
+INDEX_NAME = "insurance_products_current"
 DATA_FILE = Path(__file__).parent.parent / "data" / "insurance_products.json"
 
 client = Elasticsearch(ES_URL, api_key=ES_API_KEY)

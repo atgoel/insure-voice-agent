@@ -205,7 +205,85 @@ gcloud functions deploy rank_products --runtime python311 --trigger-http --allow
 
 ---
 
-## Budget
+## Development Setup
+
+### Environment Variables
+
+Create a `.env` file (never commit it — it is in `.gitignore`):
+
+```bash
+# Elasticsearch Cloud connection
+ES_URL=https://<your-deployment>.es.io:443
+ES_API_KEY=<your-api-key>
+
+# Deployed Cloud Function URLs (pre-linked to voice-sales-agent)
+COMPLIANCE_CHECK_URL=https://us-central1-voice-sales-agent.cloudfunctions.net/compliance_check
+RANK_PRODUCTS_URL=https://us-central1-voice-sales-agent.cloudfunctions.net/rank_products
+PRODUCT_SEARCH_URL=https://us-central1-voice-sales-agent.cloudfunctions.net/product_search
+```
+
+Alternatively, you can copy `.env.example` to `.env` which already has these pre-configured for the `voice-sales-agent` GCP project.
+
+Load the variables in your shell before running scripts:
+
+```bash
+# Linux / macOS
+export $(grep -v '^#' .env | xargs)
+
+# Windows PowerShell
+Get-Content .env | ForEach-Object { if ($_ -notmatch '^#') { $v=$_.Split('=',2); [System.Environment]::SetEnvironmentVariable($v[0],$v[1]) } }
+```
+
+### Install Dependencies
+
+```bash
+# Cloud Function dependencies (install per function)
+pip install -r functions/compliance_check/requirements.txt
+pip install -r functions/rank_products/requirements.txt
+pip install -r functions/product_search/requirements.txt
+
+# Dev / test dependencies
+pip install pytest openapi-spec-validator elasticsearch
+```
+
+### Run Tests
+
+```bash
+# Full test suite
+pytest tests/ -v
+
+# Single file
+pytest tests/test_compliance_check.py -v
+
+# With short tracebacks (CI-friendly)
+pytest tests/ --tb=short
+```
+
+Expected output: **113 passed** across 6 test files.
+
+### Validate OpenAPI Spec
+
+```bash
+python -m openapi_spec_validator agent_builder/tools.yaml
+# Expected: agent_builder/tools.yaml: OK
+```
+
+### Run Ingest (requires ES_URL + ES_API_KEY)
+
+```bash
+# Create the versioned index + alias
+python ingest/create_index.py
+
+# Force-recreate if the index already exists
+python ingest/create_index.py --delete-existing
+
+# Bulk-ingest the 28-product catalog
+python ingest/index_products.py
+```
+
+---
+
+
 
 | Item | Cost |
 |---|---|

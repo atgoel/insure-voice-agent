@@ -1,2 +1,2 @@
 functions-framework==3.*
-pydantic>=2.0
+elasticsearch>=8.15.0

@@ -90,8 +90,9 @@ Weights are constants in `functions/rank_products/main.py`. Future Phase 2 work 
       "name": "string",
       "min_age": 25,
       "max_age": 65,
-      "_score": 0.87,
-      "premium_range": { "min": 15000, "max": 45000 }
+      "elser_score": 0.87,
+      "premium_min_monthly": 1500,
+      "premium_max_monthly": 4500
     }
   ],
   "customer_profile": {
@@ -108,7 +109,7 @@ Weights are constants in `functions/rank_products/main.py`. Future Phase 2 work 
   "top3": [
     {
       "rank": 1,
-      "product": { "id": "...", "name": "...", "..." : "..." },
+      "product": { "id": "...", "name": "...", "premium_min_monthly": 1500, "premium_max_monthly": 4500 },
       "suitability_score": 0.7842,
       "score_breakdown": {
         "elser_relevance": 0.87,
@@ -116,7 +117,12 @@ Weights are constants in `functions/rank_products/main.py`. Future Phase 2 work 
         "income_fit": 0.75
       }
     }
-  ]
+  ],
+  "audit": {
+    "all_scored": [...],
+    "formula_weights": { "elser": 0.4, "age": 0.3, "income": 0.3 },
+    "customer_profile_hash": "<sha256>"
+  }
 }
 ```
 
@@ -125,7 +131,7 @@ Weights are constants in `functions/rank_products/main.py`. Future Phase 2 work 
 ## Edge Cases
 
 - `passed_products` empty → return `{"top3": []}`.
-- `_score` missing from a product → default to `0.5`.
+- `elser_score` missing from a product → default to `0.5` (normalised to `1.0` if only product in batch).
 - `sum_need` is 0 or absent → `income_fit` defaults to `0.5`.
 - All products have the same score → return first 3 in original order (stable sort).
 - `min_age == max_age` for a product → age_centrality = 1.0 if customer age matches exactly, 0.0 otherwise.

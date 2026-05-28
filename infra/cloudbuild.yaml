@@ -1,6 +1,15 @@
 # Cloud Build CI/CD Pipeline — InsureVoice
 steps:
-  # Step 1: Deploy compliance_check Cloud Function
+  # Step 1: Copy shared/ module into compliance_check package before deploy
+  # Required: compliance_check/main.py imports from shared.validation — the module
+  # must be present inside the deployment source directory at deploy time.
+  - name: 'ubuntu'
+    entrypoint: bash
+    args:
+      - -c
+      - cp -r shared/ functions/compliance_check/shared/
+
+  # Step 2: Deploy compliance_check Cloud Function
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -14,7 +23,15 @@ steps:
       - --entry-point=compliance_check
       - --region=${_REGION}
 
-  # Step 2: Deploy rank_products Cloud Function
+  # Step 3: Copy shared/ module into rank_products package before deploy
+  # Required: rank_products/main.py imports from shared.validation — same reason.
+  - name: 'ubuntu'
+    entrypoint: bash
+    args:
+      - -c
+      - cp -r shared/ functions/rank_products/shared/
+
+  # Step 4: Deploy rank_products Cloud Function
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -28,8 +45,27 @@ steps:
       - --entry-point=rank_products
       - --region=${_REGION}
 
+  # Step 5: Deploy product_search Cloud Function (no shared/ dependency)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - functions
+      - deploy
+      - product_search
+      - --runtime=python311
+      - --trigger-http
+      - --allow-unauthenticated
+      - --source=functions/product_search
+      - --entry-point=product_search
+      - --region=${_REGION}
+      - --set-env-vars=ES_URL=${_ES_URL}
+      - --set-secrets=ES_API_KEY=${_ES_API_KEY_SECRET}:latest
+
 substitutions:
   _REGION: us-central1
+  _ES_URL: ''                  # Override: --substitutions=_ES_URL=https://...
+  _ES_API_KEY_SECRET: ES_API_KEY  # GCP Secret Manager secret name
 
 options:
   logging: CLOUD_LOGGING_ONLY
+

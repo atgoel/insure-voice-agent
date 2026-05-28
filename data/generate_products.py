@@ -1,0 +1,1029 @@
+"""
+data/generate_products.py
+Canonical source of truth for the InsureVoice synthetic product catalog.
+
+Usage:
+    python data/generate_products.py                 # write insurance_products.json
+    python data/generate_products.py --validate      # write + validate all products
+    python data/generate_products.py --validate-only # validate without overwriting
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+# Allow import of shared/ when running from the repo root or data/ directory
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "insurance_products.json")
+
+
+# ---------------------------------------------------------------------------
+# TASK-012 — term_life products (TERM001–TERM004)
+# ---------------------------------------------------------------------------
+
+TERM_LIFE_PRODUCTS = [
+    {
+        "id": "TERM001",
+        "product_code": "FG_TERM_001",
+        "name": "Future Secure Term Plan",
+        "product_type": "term_life",
+        "plan_category": "Protection",
+        "uin": "123N456V01",
+        "description": (
+            "Future Secure Term Plan provides comprehensive pure life protection for individuals aged 18 to 65, "
+            "offering a high sum assured of up to ₹5 crore at highly affordable monthly premiums. "
+            "Ideal for salaried individuals seeking to protect their family from financial hardship in the event "
+            "of an untimely death, this non-smoker-eligible term plan includes a free-look period and global coverage."
+        ),
+        "key_feature": "High life cover up to ₹5 Cr at affordable premiums",
+        "sales_pitch": "Secure your family's future with India's most affordable term plan — pure protection, zero investment risk.",
+        "tags": ["term", "life cover", "protection", "affordable", "death benefit", "non-smoker"],
+        "rider_name": "Accidental Death Benefit Rider",
+        "rider_type": "Accidental",
+        "min_age": 18,
+        "max_age": 65,
+        "smoker_eligible": False,
+        "min_income": 300_000,
+        "max_sum_assured": 50_000_000,
+        "medical_required_above": 10_000_000,
+        "exclusions": ["suicide_within_1yr", "war_conflict"],
+        "premium_min_monthly": 500,
+        "premium_max_monthly": 3_000,
+        "is_active": True,
+    },
+    {
+        "id": "TERM002",
+        "product_code": "FG_TERM_002",
+        "name": "LifeGuard Plus Term",
+        "product_type": "term_life",
+        "plan_category": "Protection",
+        "uin": "124N457V01",
+        "description": (
+            "LifeGuard Plus Term is a flexible term insurance plan designed for individuals between 25 and 55, "
+            "offering increasing sum assured options to combat inflation over the policy tenure. "
+            "Both smokers and non-smokers are eligible, making it a versatile life protection solution "
+            "with optional critical illness acceleration benefit."
+        ),
+        "key_feature": "Increasing sum assured option to beat inflation",
+        "sales_pitch": "Life cover that grows with your responsibilities — flexible, comprehensive, and smoker-inclusive.",
+        "tags": ["term", "increasing cover", "smoker eligible", "critical illness acceleration", "flexible"],
+        "rider_name": "Critical Illness Acceleration Rider",
+        "rider_type": "Health",
+        "min_age": 25,
+        "max_age": 55,
+        "smoker_eligible": True,
+        "min_income": 300_000,
+        "max_sum_assured": 30_000_000,
+        "medical_required_above": 7_500_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 800,
+        "premium_max_monthly": 5_000,
+        "is_active": True,
+    },
+    {
+        "id": "TERM003",
+        "product_code": "FG_TERM_003",
+        "name": "FamilyProtect 3 Crore",
+        "product_type": "term_life",
+        "plan_category": "Protection",
+        "uin": "125N458V01",
+        "description": (
+            "FamilyProtect 3 Crore is a high-coverage term plan for breadwinners aged 18 to 75, "
+            "providing a guaranteed ₹3 crore death benefit to safeguard dependents, spouse, and children "
+            "against income loss. This plan is available to both smokers and non-smokers and offers a joint "
+            "life option to cover both spouses under a single policy."
+        ),
+        "key_feature": "₹3 Crore guaranteed death benefit with joint life option",
+        "sales_pitch": "One plan to protect your entire family — cover your spouse too under a single premium.",
+        "tags": ["term", "family protection", "joint life", "high cover", "3 crore", "breadwinner"],
+        "rider_name": "Waiver of Premium Rider",
+        "rider_type": "Disability",
+        "min_age": 18,
+        "max_age": 75,
+        "smoker_eligible": True,
+        "min_income": 500_000,
+        "max_sum_assured": 30_000_000,
+        "medical_required_above": 5_000_000,
+        "exclusions": ["suicide_within_1yr", "self_inflicted"],
+        "premium_min_monthly": 1_200,
+        "premium_max_monthly": 8_000,
+        "is_active": True,
+    },
+    {
+        "id": "TERM004",
+        "product_code": "FG_TERM_004",
+        "name": "YoungTerm Advantage",
+        "product_type": "term_life",
+        "plan_category": "Protection",
+        "uin": "126N459V01",
+        "description": (
+            "YoungTerm Advantage is a term insurance plan exclusively designed for young professionals aged 30 to 60, "
+            "offering premium discounts for early entry and healthy lifestyle choices. "
+            "Non-smoker individuals benefit from significantly reduced premiums, and the plan offers a return "
+            "of premium variant for those seeking maturity value."
+        ),
+        "key_feature": "Lower premiums for young non-smokers with return of premium option",
+        "sales_pitch": "Start young, pay less — lock in the lowest premiums now with a plan that rewards healthy living.",
+        "tags": ["term", "young professional", "non-smoker discount", "return of premium", "affordable"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 30,
+        "max_age": 60,
+        "smoker_eligible": False,
+        "min_income": 400_000,
+        "max_sum_assured": 20_000_000,
+        "medical_required_above": 10_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 600,
+        "premium_max_monthly": 2_500,
+        "is_active": True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# TASK-013 — health products (HLTH001–HLTH004)
+# ---------------------------------------------------------------------------
+
+HEALTH_PRODUCTS = [
+    {
+        "id": "HLTH001",
+        "product_code": "FG_HLTH_001",
+        "name": "MediCare Family Floater",
+        "product_type": "health",
+        "plan_category": "Health Insurance",
+        "uin": "234N567V01",
+        "description": (
+            "MediCare Family Floater provides comprehensive health insurance coverage for the entire family "
+            "under a single sum insured of up to ₹50 lakh, covering hospitalisation, day-care procedures, "
+            "and pre/post-hospitalisation expenses for individuals aged 18 to 65. "
+            "It includes maternity benefits, newborn cover, and a no-claim bonus of 50% per claim-free year."
+        ),
+        "key_feature": "Family floater cover up to ₹50L with no-claim bonus",
+        "sales_pitch": "One policy, whole family covered — hospitalisation, maternity, and annual health check-ups included.",
+        "tags": ["health", "family floater", "hospitalisation", "maternity", "cashless", "no-claim bonus"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 18,
+        "max_age": 65,
+        "smoker_eligible": True,
+        "min_income": 200_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 3_000_000,
+        "exclusions": ["cosmetic_surgery", "dental_routine", "pre_existing_2yr_waiting"],
+        "premium_min_monthly": 1_500,
+        "premium_max_monthly": 6_000,
+        "is_active": True,
+    },
+    {
+        "id": "HLTH002",
+        "product_code": "FG_HLTH_002",
+        "name": "CriticalCare Senior Shield",
+        "product_type": "health",
+        "plan_category": "Health Insurance",
+        "uin": "235N568V01",
+        "description": (
+            "CriticalCare Senior Shield is a health insurance plan designed specifically for senior citizens "
+            "aged 45 to 80, offering coverage for age-related illnesses, domiciliary hospitalisation, and "
+            "AYUSH treatments without any co-payment clause up to ₹25 lakh. "
+            "The plan covers pre-existing diseases after a 12-month waiting period, making it the right choice "
+            "for older customers."
+        ),
+        "key_feature": "Senior citizen health cover up to ₹25L with AYUSH and domiciliary benefits",
+        "sales_pitch": "Age-proof your health with a plan built for seniors — no co-payment, AYUSH cover, and pre-existing disease coverage.",
+        "tags": ["health", "senior citizen", "elderly", "AYUSH", "domiciliary", "pre-existing disease"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 45,
+        "max_age": 80,
+        "smoker_eligible": True,
+        "min_income": 200_000,
+        "max_sum_assured": 2_500_000,
+        "medical_required_above": 1_500_000,
+        "exclusions": ["cosmetic_surgery", "self_inflicted"],
+        "premium_min_monthly": 3_000,
+        "premium_max_monthly": 10_000,
+        "is_active": True,
+    },
+    {
+        "id": "HLTH003",
+        "product_code": "FG_HLTH_003",
+        "name": "HealthFirst Individual",
+        "product_type": "health",
+        "plan_category": "Health Insurance",
+        "uin": "236N569V01",
+        "description": (
+            "HealthFirst Individual is a standalone health insurance plan for working adults aged 18 to 60, "
+            "offering a sum insured of up to ₹1 crore with unlimited restoration of sum insured, "
+            "annual health check-ups, and teleconsultation services. "
+            "It provides cashless treatment at over 10,000 network hospitals and covers mental health hospitalisation."
+        ),
+        "key_feature": "Up to ₹1 Cr cover with unlimited sum insured restoration",
+        "sales_pitch": "Unlimited protection for your health journey — sum insured restores automatically after every claim.",
+        "tags": ["health", "individual", "unlimited restoration", "mental health", "cashless", "teleconsultation"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 18,
+        "max_age": 60,
+        "smoker_eligible": False,
+        "min_income": 300_000,
+        "max_sum_assured": 10_000_000,
+        "medical_required_above": 5_000_000,
+        "exclusions": ["cosmetic_surgery", "dental_routine", "pre_existing_2yr_waiting"],
+        "premium_min_monthly": 1_200,
+        "premium_max_monthly": 4_500,
+        "is_active": True,
+    },
+    {
+        "id": "HLTH004",
+        "product_code": "FG_HLTH_004",
+        "name": "ParentsCare Plus",
+        "product_type": "health",
+        "plan_category": "Health Insurance",
+        "uin": "237N570V01",
+        "description": (
+            "ParentsCare Plus is a dedicated health insurance plan for parents and in-laws, providing coverage "
+            "for individuals aged 55 to 75 with benefits including annual preventive health check-ups, "
+            "ambulance cover, and organ donor expenses. "
+            "The plan offers a sum insured of up to ₹20 lakh with a 4-year waiting period for pre-existing "
+            "diseases and no sub-limits on room rent."
+        ),
+        "key_feature": "Dedicated cover for parents aged 55–75 with no room rent sub-limits",
+        "sales_pitch": "Give your parents the gift of worry-free health care — comprehensive coverage designed just for them.",
+        "tags": ["health", "parents", "senior", "elderly", "preventive", "organ donor", "no room rent limit"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 55,
+        "max_age": 75,
+        "smoker_eligible": True,
+        "min_income": 300_000,
+        "max_sum_assured": 2_000_000,
+        "medical_required_above": 1_000_000,
+        "exclusions": ["cosmetic_surgery", "dental_routine", "pre_existing_4yr_waiting"],
+        "premium_min_monthly": 4_000,
+        "premium_max_monthly": 12_000,
+        "is_active": True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# TASK-014 — ULIP products (ULIP001–ULIP004)
+# smoker_eligible=False, income floors ₹5L–₹10L
+# ---------------------------------------------------------------------------
+
+ULIP_PRODUCTS = [
+    {
+        "id": "ULIP001",
+        "product_code": "FG_ULIP_001",
+        "name": "WealthShield ULIP",
+        "product_type": "ulip",
+        "plan_category": "ULIP",
+        "uin": "345N678V01",
+        "description": (
+            "WealthShield ULIP combines market-linked investment returns with life insurance protection "
+            "for individuals aged 18 to 55, offering a choice of equity, debt, and balanced fund options "
+            "with free switching. It provides a minimum guaranteed death benefit of 10× the annual premium "
+            "and a 5-year lock-in period as required by IRDAI."
+        ),
+        "key_feature": "Market-linked growth with 10x guaranteed death benefit",
+        "sales_pitch": "Grow your wealth and protect your life in one plan — invest in markets while your family stays secured.",
+        "tags": ["ulip", "investment", "market-linked", "equity", "life cover", "fund switching", "wealth creation"],
+        "rider_name": "Critical Illness Rider",
+        "rider_type": "Health",
+        "min_age": 18,
+        "max_age": 55,
+        "smoker_eligible": False,
+        "min_income": 500_000,
+        "max_sum_assured": 20_000_000,
+        "medical_required_above": 10_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 2_000,
+        "premium_max_monthly": 50_000,
+        "is_active": True,
+    },
+    {
+        "id": "ULIP002",
+        "product_code": "FG_ULIP_002",
+        "name": "FutureBuild ULIP",
+        "product_type": "ulip",
+        "plan_category": "ULIP",
+        "uin": "346N679V01",
+        "description": (
+            "FutureBuild ULIP is a goal-based investment-cum-insurance plan for ages 25 to 60 that automatically "
+            "reallocates funds from equity to debt as the policy nears maturity, protecting accumulated wealth "
+            "from market volatility. It offers loyalty additions from the 6th year and a systematic partial "
+            "withdrawal facility after the 5-year lock-in."
+        ),
+        "key_feature": "Auto-rebalancing funds + loyalty additions from year 6",
+        "sales_pitch": "Build your future goals systematically — auto-rebalancing ensures your wealth is always optimally invested.",
+        "tags": ["ulip", "goal-based", "auto-rebalancing", "loyalty addition", "partial withdrawal", "wealth"],
+        "rider_name": "Waiver of Premium Rider",
+        "rider_type": "Disability",
+        "min_age": 25,
+        "max_age": 60,
+        "smoker_eligible": False,
+        "min_income": 600_000,
+        "max_sum_assured": 30_000_000,
+        "medical_required_above": 15_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 3_000,
+        "premium_max_monthly": 100_000,
+        "is_active": True,
+    },
+    {
+        "id": "ULIP003",
+        "product_code": "FG_ULIP_003",
+        "name": "MarketLinked Growth Plan",
+        "product_type": "ulip",
+        "plan_category": "Investment",
+        "uin": "347N680V01",
+        "description": (
+            "MarketLinked Growth Plan is an aggressive equity-focused ULIP for investors aged 18 to 65 "
+            "seeking maximum long-term capital appreciation, with zero premium allocation charges from day "
+            "one and a 100% equity fund option. "
+            "The plan targets high-income earners with an investment mindset who also need life cover compliance."
+        ),
+        "key_feature": "Zero premium allocation charges with 100% equity fund option",
+        "sales_pitch": "Maximise your market returns with zero charges — every rupee invested works for you from day one.",
+        "tags": ["ulip", "equity", "zero charges", "high return", "aggressive", "investment", "capital growth"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 18,
+        "max_age": 65,
+        "smoker_eligible": False,
+        "min_income": 800_000,
+        "max_sum_assured": 50_000_000,
+        "medical_required_above": 20_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 5_000,
+        "premium_max_monthly": 200_000,
+        "is_active": True,
+    },
+    {
+        "id": "ULIP004",
+        "product_code": "FG_ULIP_004",
+        "name": "ChildFuture ULIP",
+        "product_type": "ulip",
+        "plan_category": "ULIP",
+        "uin": "348N681V01",
+        "description": (
+            "ChildFuture ULIP is a dedicated child education and future planning ULIP for parents aged 18 to 55, "
+            "with an automatic waiver of all future premiums if the parent dies, ensuring the child's education "
+            "fund continues uninterrupted. "
+            "At maturity, the fund value is paid directly toward the child's education milestones."
+        ),
+        "key_feature": "Premium waiver on parent's death ensures uninterrupted education fund",
+        "sales_pitch": "Your child's education fund continues even if you are not there — automatic premium waiver on death.",
+        "tags": ["ulip", "child", "education", "premium waiver", "family protection", "future planning"],
+        "rider_name": "Premium Waiver Rider",
+        "rider_type": "Disability",
+        "min_age": 18,
+        "max_age": 55,
+        "smoker_eligible": False,
+        "min_income": 500_000,
+        "max_sum_assured": 15_000_000,
+        "medical_required_above": 10_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 2_000,
+        "premium_max_monthly": 30_000,
+        "is_active": True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# TASK-015 — endowment products (ENDT001–ENDT004)
+# ---------------------------------------------------------------------------
+
+ENDOWMENT_PRODUCTS = [
+    {
+        "id": "ENDT001",
+        "product_code": "FG_ENDT_001",
+        "name": "GrowthSure Endowment",
+        "product_type": "endowment",
+        "plan_category": "Savings",
+        "uin": "456N789V01",
+        "description": (
+            "GrowthSure Endowment is a traditional participating endowment plan for ages 18 to 55 that "
+            "guarantees a maturity benefit along with bonus accumulations, making it ideal for individuals "
+            "who want assured savings combined with life insurance protection. "
+            "Bonuses declared annually enhance the maturity corpus substantially over a 15–20 year term."
+        ),
+        "key_feature": "Guaranteed maturity benefit + annual bonus accumulation",
+        "sales_pitch": "Save with certainty — guaranteed returns plus bonuses make this the safest way to build your corpus.",
+        "tags": ["endowment", "savings", "guaranteed", "bonus", "maturity", "traditional", "participating"],
+        "rider_name": "Accidental Death Benefit Rider",
+        "rider_type": "Accidental",
+        "min_age": 18,
+        "max_age": 55,
+        "smoker_eligible": True,
+        "min_income": 300_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 2_500_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 2_000,
+        "premium_max_monthly": 20_000,
+        "is_active": True,
+    },
+    {
+        "id": "ENDT002",
+        "product_code": "FG_ENDT_002",
+        "name": "MoneyBack Classic",
+        "product_type": "endowment",
+        "plan_category": "Savings",
+        "uin": "457N790V01",
+        "description": (
+            "MoneyBack Classic is a money-back savings plan for individuals aged 25 to 60 that pays out a "
+            "percentage of the sum assured at regular intervals (every 5 years), providing liquidity for "
+            "planned expenses such as children's education, home purchase, or medical emergencies, "
+            "while keeping the life cover intact throughout the policy term."
+        ),
+        "key_feature": "Regular money-back payouts every 5 years for planned expenses",
+        "sales_pitch": "Get cash back when you need it — periodic payouts for life's milestones while your cover remains intact.",
+        "tags": ["endowment", "money-back", "savings", "periodic payout", "liquidity", "education", "planned expenses"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 25,
+        "max_age": 60,
+        "smoker_eligible": True,
+        "min_income": 300_000,
+        "max_sum_assured": 3_000_000,
+        "medical_required_above": 2_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 1_500,
+        "premium_max_monthly": 15_000,
+        "is_active": True,
+    },
+    {
+        "id": "ENDT003",
+        "product_code": "FG_ENDT_003",
+        "name": "Jeevan Raksha Plan",
+        "product_type": "endowment",
+        "plan_category": "Savings",
+        "uin": "458N791V01",
+        "description": (
+            "Jeevan Raksha Plan is a limited premium payment endowment plan for ages 18 to 65 where premiums "
+            "are paid for only 10 years but the cover and savings benefits continue for 20 years, reducing "
+            "long-term financial commitment while maximising coverage duration. "
+            "The plan includes a terminal illness benefit and a guaranteed addition of ₹50 per ₹1000 sum "
+            "assured per year."
+        ),
+        "key_feature": "Pay for 10 years, coverage continues for 20 years with guaranteed additions",
+        "sales_pitch": "Pay less, get more — limited premium commitment with 20 years of protection and guaranteed additions.",
+        "tags": ["endowment", "limited premium", "savings", "guaranteed addition", "terminal illness", "long-term"],
+        "rider_name": "Critical Illness Rider",
+        "rider_type": "Health",
+        "min_age": 18,
+        "max_age": 65,
+        "smoker_eligible": True,
+        "min_income": 400_000,
+        "max_sum_assured": 10_000_000,
+        "medical_required_above": 5_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 3_000,
+        "premium_max_monthly": 25_000,
+        "is_active": True,
+    },
+    {
+        "id": "ENDT004",
+        "product_code": "FG_ENDT_004",
+        "name": "SavingsPlus Guaranteed",
+        "product_type": "endowment",
+        "plan_category": "Savings",
+        "uin": "459N792V01",
+        "description": (
+            "SavingsPlus Guaranteed is a non-participating endowment plan for individuals aged 30 to 55 "
+            "with fully guaranteed maturity benefits declared upfront at policy inception, eliminating any "
+            "uncertainty about returns. "
+            "It is suitable for conservative savers who prioritise capital protection over high returns "
+            "and want a fixed corpus at the end of the term."
+        ),
+        "key_feature": "100% guaranteed maturity benefit declared upfront at inception",
+        "sales_pitch": "Know exactly what you will receive at maturity — fully guaranteed returns with zero uncertainty.",
+        "tags": ["endowment", "guaranteed", "non-participating", "savings", "capital protection", "conservative"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 30,
+        "max_age": 55,
+        "smoker_eligible": True,
+        "min_income": 400_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 3_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 2_500,
+        "premium_max_monthly": 18_000,
+        "is_active": True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# TASK-016 — critical_illness products (CRIT001–CRIT004)
+# Conditions: cancer, heart attack, stroke mentioned in descriptions
+# ---------------------------------------------------------------------------
+
+CRITICAL_ILLNESS_PRODUCTS = [
+    {
+        "id": "CRIT001",
+        "product_code": "FG_CRIT_001",
+        "name": "CancerCare Shield",
+        "product_type": "critical_illness",
+        "plan_category": "Critical Illness",
+        "uin": "567N890V01",
+        "description": (
+            "CancerCare Shield provides a lump-sum payout of up to ₹50 lakh upon diagnosis of any of 12 listed "
+            "cancer stages and types, for non-smoker individuals aged 18 to 65. "
+            "The benefit is paid directly to the policyholder on diagnosis, independent of hospitalisation, "
+            "enabling access to advanced treatment, second opinions, and income replacement during recovery."
+        ),
+        "key_feature": "Lump-sum payout on cancer diagnosis — 12 covered cancer types",
+        "sales_pitch": "Fight cancer without financial worry — receive your full benefit amount on diagnosis, no hospitalisation required.",
+        "tags": ["critical illness", "cancer", "lump-sum", "diagnosis benefit", "non-smoker", "oncology"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 18,
+        "max_age": 65,
+        "smoker_eligible": False,
+        "min_income": 300_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 0,
+        "exclusions": ["pre_existing_cancer", "smoking_related_cancer"],
+        "premium_min_monthly": 800,
+        "premium_max_monthly": 5_000,
+        "is_active": True,
+    },
+    {
+        "id": "CRIT002",
+        "product_code": "FG_CRIT_002",
+        "name": "HeartShield CI Plan",
+        "product_type": "critical_illness",
+        "plan_category": "Critical Illness",
+        "uin": "568N891V01",
+        "description": (
+            "HeartShield CI Plan pays a lump-sum benefit on the first occurrence of heart attack, coronary "
+            "artery bypass graft, or heart valve surgery for individuals aged 25 to 60, both smokers and "
+            "non-smokers. "
+            "The plan also covers stroke resulting in permanent neurological deficit, providing financial "
+            "support for prolonged recovery and rehabilitation after cardiac events."
+        ),
+        "key_feature": "Covers heart attack, CABG, heart valve surgery, and stroke",
+        "sales_pitch": "Your heart health is your wealth — get a lump-sum payout on cardiac events for treatment and recovery.",
+        "tags": ["critical illness", "heart attack", "cardiac", "stroke", "CABG", "heart valve", "smoker eligible"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 25,
+        "max_age": 60,
+        "smoker_eligible": True,
+        "min_income": 300_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 0,
+        "exclusions": ["pre_existing_heart_condition_2yr"],
+        "premium_min_monthly": 1_000,
+        "premium_max_monthly": 7_000,
+        "is_active": True,
+    },
+    {
+        "id": "CRIT003",
+        "product_code": "FG_CRIT_003",
+        "name": "CI Protect 36 Conditions",
+        "product_type": "critical_illness",
+        "plan_category": "Critical Illness",
+        "uin": "569N892V01",
+        "description": (
+            "CI Protect 36 Conditions is a comprehensive critical illness plan for individuals aged 18 to 70 "
+            "covering 36 major and minor critical illnesses including cancer, kidney failure, major organ "
+            "transplant, paralysis, blindness, and loss of limbs, with a benefit payout on first diagnosis. "
+            "A second opinion service with leading specialists is included at no extra cost."
+        ),
+        "key_feature": "36 critical illnesses covered including minor and major conditions",
+        "sales_pitch": "The widest critical illness cover available — 36 conditions, one comprehensive plan, peace of mind guaranteed.",
+        "tags": ["critical illness", "36 conditions", "comprehensive", "kidney failure", "organ transplant", "paralysis", "cancer"],
+        "rider_name": "Income Replacement Rider",
+        "rider_type": "Income",
+        "min_age": 18,
+        "max_age": 70,
+        "smoker_eligible": True,
+        "min_income": 300_000,
+        "max_sum_assured": 10_000_000,
+        "medical_required_above": 0,
+        "exclusions": ["pre_existing_3yr_waiting", "congenital_conditions"],
+        "premium_min_monthly": 1_200,
+        "premium_max_monthly": 8_000,
+        "is_active": True,
+    },
+    {
+        "id": "CRIT004",
+        "product_code": "FG_CRIT_004",
+        "name": "SeriousIllness Cover",
+        "product_type": "critical_illness",
+        "plan_category": "Critical Illness",
+        "uin": "570N893V01",
+        "description": (
+            "SeriousIllness Cover is a standalone critical illness plan for ages 30 to 65 that pays 100% "
+            "of the sum insured on diagnosis of any of the 20 covered serious illnesses — including cancer, "
+            "stroke, and heart failure — and additionally pays 50% of the sum insured as a recovery benefit "
+            "12 months after the diagnosis, providing financial support both at the time of diagnosis and "
+            "during the long recovery phase."
+        ),
+        "key_feature": "Diagnosis payout + 50% recovery benefit after 12 months",
+        "sales_pitch": "Double protection — full benefit at diagnosis and a recovery boost 12 months later to rebuild your life.",
+        "tags": ["critical illness", "recovery benefit", "diagnosis", "serious illness", "double payout", "rehabilitation"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 30,
+        "max_age": 65,
+        "smoker_eligible": False,
+        "min_income": 400_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 0,
+        "exclusions": ["pre_existing_3yr_waiting", "smoking_related"],
+        "premium_min_monthly": 1_500,
+        "premium_max_monthly": 9_000,
+        "is_active": True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# TASK-017 — pension products (PENS001–PENS004)
+# Entry age 30+ in all products
+# ---------------------------------------------------------------------------
+
+PENSION_PRODUCTS = [
+    {
+        "id": "PENS001",
+        "product_code": "FG_PENS_001",
+        "name": "RetireSmart Pension",
+        "product_type": "pension",
+        "plan_category": "Retirement",
+        "uin": "678N901V01",
+        "description": (
+            "RetireSmart Pension is a deferred annuity plan for individuals aged 30 to 65 allowing systematic "
+            "accumulation of retirement corpus during the working years, with a choice of immediate or deferred "
+            "annuity options at vesting. "
+            "It offers a guaranteed minimum return on the accumulated corpus and the flexibility to commute "
+            "up to one-third of the corpus as a tax-free lump sum at retirement."
+        ),
+        "key_feature": "Guaranteed minimum return with flexible annuity options at vesting",
+        "sales_pitch": "Build your retirement nest egg systematically — guaranteed returns and flexible payout options at retirement.",
+        "tags": ["pension", "retirement", "annuity", "deferred", "corpus", "tax-free", "guaranteed return"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 30,
+        "max_age": 65,
+        "smoker_eligible": True,
+        "min_income": 400_000,
+        "max_sum_assured": 50_000_000,
+        "medical_required_above": 0,
+        "exclusions": [],
+        "premium_min_monthly": 2_000,
+        "premium_max_monthly": 50_000,
+        "is_active": True,
+    },
+    {
+        "id": "PENS002",
+        "product_code": "FG_PENS_002",
+        "name": "GoldenYears Annuity",
+        "product_type": "pension",
+        "plan_category": "Retirement",
+        "uin": "679N902V01",
+        "description": (
+            "GoldenYears Annuity is an immediate annuity plan for retirees and pre-retirees aged 40 to 75 "
+            "that converts a lump-sum investment into a guaranteed lifetime income stream, with multiple "
+            "annuity variants including life annuity, joint life with spouse, and annuity with return of "
+            "purchase price. "
+            "Monthly income starts from the very next month after purchase."
+        ),
+        "key_feature": "Guaranteed lifetime income from next month — multiple annuity variants",
+        "sales_pitch": "Convert your savings into guaranteed monthly income for life — your pension starts the very next month.",
+        "tags": ["pension", "annuity", "retirement", "guaranteed income", "joint life", "immediate", "lifetime"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 40,
+        "max_age": 75,
+        "smoker_eligible": True,
+        "min_income": 500_000,
+        "max_sum_assured": 100_000_000,
+        "medical_required_above": 0,
+        "exclusions": [],
+        "premium_min_monthly": 5_000,
+        "premium_max_monthly": 200_000,
+        "is_active": True,
+    },
+    {
+        "id": "PENS003",
+        "product_code": "FG_PENS_003",
+        "name": "PensionMaxx Plan",
+        "product_type": "pension",
+        "plan_category": "Retirement",
+        "uin": "680N903V01",
+        "description": (
+            "PensionMaxx Plan is a unit-linked pension plan for working professionals aged 25 to 60 combining "
+            "equity market exposure during the accumulation phase with a guaranteed annuity at vesting, "
+            "offering the best of both investment growth and retirement income security. "
+            "It includes a life cover of at least 10× annual premium throughout the policy term."
+        ),
+        "key_feature": "Market-linked accumulation with guaranteed annuity at retirement",
+        "sales_pitch": "Grow your pension corpus in equity markets and lock in guaranteed retirement income — the best of both worlds.",
+        "tags": ["pension", "retirement", "unit-linked", "equity", "market-linked", "annuity", "life cover"],
+        "rider_name": "Accidental Death Benefit Rider",
+        "rider_type": "Accidental",
+        "min_age": 25,
+        "max_age": 60,
+        "smoker_eligible": False,
+        "min_income": 500_000,
+        "max_sum_assured": 30_000_000,
+        "medical_required_above": 0,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 3_000,
+        "premium_max_monthly": 100_000,
+        "is_active": True,
+    },
+    {
+        "id": "PENS004",
+        "product_code": "FG_PENS_004",
+        "name": "SecureRetirement Plan",
+        "product_type": "pension",
+        "plan_category": "Retirement",
+        "uin": "681N904V01",
+        "description": (
+            "SecureRetirement Plan is a traditional non-participating pension plan for individuals aged 35 to "
+            "65 offering a fully guaranteed vesting benefit with no exposure to market risk, making it the "
+            "ideal choice for risk-averse individuals approaching retirement. "
+            "The plan provides a loan facility after 3 years and a partial surrender option after 5 years."
+        ),
+        "key_feature": "Fully guaranteed vesting benefit with zero market risk",
+        "sales_pitch": "Retire with certainty — fully guaranteed pension corpus with no market risk, loans available after 3 years.",
+        "tags": ["pension", "retirement", "guaranteed", "no market risk", "conservative", "loan facility"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 35,
+        "max_age": 65,
+        "smoker_eligible": True,
+        "min_income": 500_000,
+        "max_sum_assured": 20_000_000,
+        "medical_required_above": 0,
+        "exclusions": [],
+        "premium_min_monthly": 4_000,
+        "premium_max_monthly": 50_000,
+        "is_active": True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# TASK-018 — child_plan products (CHLD001–CHLD004)
+# max parent entry age ≤ 55, smoker_eligible=False
+# ---------------------------------------------------------------------------
+
+CHILD_PLAN_PRODUCTS = [
+    {
+        "id": "CHLD001",
+        "product_code": "FG_CHLD_001",
+        "name": "ChildStar Future Plan",
+        "product_type": "child_plan",
+        "plan_category": "Child",
+        "uin": "789N012V01",
+        "description": (
+            "ChildStar Future Plan is a child education savings plan for parents aged 18 to 45 that provides "
+            "a guaranteed education fund for the child at ages 18, 21, and 25, with automatic waiver of all "
+            "future premiums and continuation of the fund in case of the parent's death. "
+            "The plan includes a survival benefit payout at key educational milestones."
+        ),
+        "key_feature": "Education fund payouts at child's age 18, 21, and 25 with premium waiver on parent's death",
+        "sales_pitch": "Your child's education is guaranteed — fund payouts at every milestone even if you are not around.",
+        "tags": ["child", "education", "savings", "premium waiver", "milestone payout", "parent death", "future planning"],
+        "rider_name": "Premium Waiver Rider",
+        "rider_type": "Disability",
+        "min_age": 18,
+        "max_age": 45,
+        "smoker_eligible": False,
+        "min_income": 400_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 3_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 2_000,
+        "premium_max_monthly": 20_000,
+        "is_active": True,
+    },
+    {
+        "id": "CHLD002",
+        "product_code": "FG_CHLD_002",
+        "name": "SmartKid Plus",
+        "product_type": "child_plan",
+        "plan_category": "Child",
+        "uin": "790N013V01",
+        "description": (
+            "SmartKid Plus is a participating child plan for parents aged 20 to 50 that builds a scholarship "
+            "and higher education corpus through annual bonus additions, with the entire maturity amount paid "
+            "when the child turns 18. "
+            "The plan provides life cover for the parent throughout the term and includes a guaranteed addition "
+            "of ₹40 per ₹1000 sum assured per policy year."
+        ),
+        "key_feature": "Annual bonus additions build a higher education corpus paid at child's age 18",
+        "sales_pitch": "Let bonuses do the heavy lifting — build your child's college fund automatically with annual additions every year.",
+        "tags": ["child", "education", "bonus", "scholarship", "savings", "higher education", "maturity"],
+        "rider_name": None,
+        "rider_type": None,
+        "min_age": 20,
+        "max_age": 50,
+        "smoker_eligible": False,
+        "min_income": 400_000,
+        "max_sum_assured": 5_000_000,
+        "medical_required_above": 2_500_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 1_500,
+        "premium_max_monthly": 15_000,
+        "is_active": True,
+    },
+    {
+        "id": "CHLD003",
+        "product_code": "FG_CHLD_003",
+        "name": "ChildEducation Guard",
+        "product_type": "child_plan",
+        "plan_category": "Child",
+        "uin": "791N014V01",
+        "description": (
+            "ChildEducation Guard is a unit-linked child plan for parents aged 18 to 55 offering market-linked "
+            "growth of the education corpus with a guaranteed minimum fund value at maturity, ensuring a "
+            "minimum corpus regardless of market performance. "
+            "The plan offers annual partial withdrawals after the 5-year lock-in to fund ongoing school expenses."
+        ),
+        "key_feature": "Market-linked growth with guaranteed minimum fund value at maturity",
+        "sales_pitch": "Invest in your child's future with markets on your side — guaranteed minimum corpus regardless of volatility.",
+        "tags": ["child", "education", "unit-linked", "market-linked", "guaranteed minimum", "partial withdrawal", "school expenses"],
+        "rider_name": "Accidental Death Benefit Rider",
+        "rider_type": "Accidental",
+        "min_age": 18,
+        "max_age": 55,
+        "smoker_eligible": False,
+        "min_income": 500_000,
+        "max_sum_assured": 10_000_000,
+        "medical_required_above": 5_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 2_000,
+        "premium_max_monthly": 25_000,
+        "is_active": True,
+    },
+    {
+        "id": "CHLD004",
+        "product_code": "FG_CHLD_004",
+        "name": "FutureAce Child Plan",
+        "product_type": "child_plan",
+        "plan_category": "Child",
+        "uin": "792N015V01",
+        "description": (
+            "FutureAce Child Plan is a comprehensive child protection and savings plan for parents aged 25 "
+            "to 50 that pays the full sum assured immediately upon the parent's death as an immediate benefit, "
+            "waives all future premiums, and continues the policy to maturity to provide the child with the "
+            "full educational corpus as originally planned."
+        ),
+        "key_feature": "Immediate death benefit + full maturity corpus regardless of parent's death",
+        "sales_pitch": "Two benefits on parent's death — immediate payout AND full maturity corpus for your child's future.",
+        "tags": ["child", "education", "immediate benefit", "double benefit", "premium waiver", "savings", "protection"],
+        "rider_name": "Critical Illness Rider",
+        "rider_type": "Health",
+        "min_age": 25,
+        "max_age": 50,
+        "smoker_eligible": False,
+        "min_income": 500_000,
+        "max_sum_assured": 8_000_000,
+        "medical_required_above": 4_000_000,
+        "exclusions": ["suicide_within_1yr"],
+        "premium_min_monthly": 2_500,
+        "premium_max_monthly": 30_000,
+        "is_active": True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Combined catalog — all 28 products
+# ---------------------------------------------------------------------------
+
+ALL_PRODUCTS = (
+    TERM_LIFE_PRODUCTS
+    + HEALTH_PRODUCTS
+    + ULIP_PRODUCTS
+    + ENDOWMENT_PRODUCTS
+    + CRITICAL_ILLNESS_PRODUCTS
+    + PENSION_PRODUCTS
+    + CHILD_PLAN_PRODUCTS
+)
+
+EXPECTED_COUNT = 28
+EXPECTED_PRODUCT_TYPES = {
+    "term_life", "health", "ulip", "endowment",
+    "critical_illness", "pension", "child_plan",
+}
+
+REQUIRED_FIELDS = {
+    "id", "product_code", "name", "product_type", "plan_category",
+    "uin", "description", "key_feature", "sales_pitch", "tags",
+    "rider_name", "rider_type",
+    "min_age", "max_age", "smoker_eligible", "min_income",
+    "max_sum_assured", "medical_required_above", "exclusions",
+    "premium_min_monthly", "premium_max_monthly", "is_active",
+}
+
+
+# ---------------------------------------------------------------------------
+# TASK-019 — --validate flag: load each product through InsuranceProduct
+# ---------------------------------------------------------------------------
+
+def validate_catalog(products: list) -> None:
+    """
+    Validate each product dict against the InsuranceProduct dataclass.
+    Raises AssertionError with a clear message on the first failure.
+    """
+    from shared.models import InsuranceProduct  # imported here to keep this file usable standalone
+
+    errors = []
+
+    # Structural checks first (no dataclass dependency)
+    seen_ids: set = set()
+    for i, p in enumerate(products):
+        pid = p.get("id", f"<missing id at index {i}>")
+
+        # Duplicate ID check
+        if pid in seen_ids:
+            errors.append(f"[{pid}] Duplicate product ID")
+        seen_ids.add(pid)
+
+        # Required field presence
+        missing = REQUIRED_FIELDS - set(p.keys())
+        if missing:
+            errors.append(f"[{pid}] Missing fields: {sorted(missing)}")
+
+        # Description length
+        desc = p.get("description", "")
+        if len(desc) < 50:
+            errors.append(f"[{pid}] description too short ({len(desc)} chars, min 50)")
+
+        # Dataclass instantiation (type validation)
+        try:
+            product_obj = InsuranceProduct(**{k: p[k] for k in REQUIRED_FIELDS if k in p})
+            assert product_obj.id == pid
+        except (TypeError, KeyError) as exc:
+            errors.append(f"[{pid}] InsuranceProduct instantiation failed: {exc}")
+
+    # Product type coverage
+    actual_types = {p.get("product_type") for p in products}
+    missing_types = EXPECTED_PRODUCT_TYPES - actual_types
+    if missing_types:
+        errors.append(f"Missing product types: {sorted(missing_types)}")
+
+    # Count check
+    if len(products) != EXPECTED_COUNT:
+        errors.append(f"Expected {EXPECTED_COUNT} products, found {len(products)}")
+
+    if errors:
+        formatted = "\n  ".join(errors)
+        raise AssertionError(f"Catalog validation failed ({len(errors)} error(s)):\n  {formatted}")
+
+    print(f"  Validation passed: {len(products)} products, "
+          f"{len(actual_types)} product types, all required fields present.")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point — TASK-020
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate or validate the InsureVoice insurance product catalog."
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate all products against InsuranceProduct dataclass after writing.",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        dest="validate_only",
+        help="Validate without overwriting insurance_products.json.",
+    )
+    args = parser.parse_args()
+
+    if not args.validate_only:
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as fh:
+            json.dump(ALL_PRODUCTS, fh, indent=2, ensure_ascii=False)
+        print(f"Written {len(ALL_PRODUCTS)} products → {OUTPUT_FILE}")
+
+    if args.validate or args.validate_only:
+        print("Validating catalog …")
+        source = ALL_PRODUCTS if args.validate_only else json.loads(
+            open(OUTPUT_FILE, encoding="utf-8").read()
+        )
+        validate_catalog(source)
+
+
+if __name__ == "__main__":
+    main()
