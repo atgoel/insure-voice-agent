@@ -63,6 +63,7 @@ Adding a new rule to `COMPLIANCE_RULES` does not break existing passing products
 | `SMOKER_EXCLUSION` | `not (customer.smoker and not product.smoker_eligible)` | `"Product not available for smokers"` |
 | `INCOME_SUM_CAP` | `customer.sum_need <= customer.income * 10` | `"Requested sum assured exceeds 10x annual income cap"` |
 | `MEDICAL_EXAM_REQUIRED` | `not (sum_need > product.medical_required_above and health != 'healthy')` | `"Medical exam required for this sum assured with declared health conditions"` |
+| `INCOME_MIN` | `customer.income >= product.min_income` | `"Minimum income requirement is ₹{min_income:,}; customer income is ₹{income:,}"` |
 
 ---
 
@@ -127,8 +128,8 @@ Adding a new rule to `COMPLIANCE_RULES` does not break existing passing products
 
 ## Technical Notes
 
-- Existing implementation: `functions/compliance_check/main.py` — partially implemented. Spec validates and extends it.
+- Existing implementation: `functions/compliance_check/main.py` — fully implemented. Core rules, input validation, audit trail, and tests are complete.
 - Framework: `functions-framework` (`@functions_framework.http` decorator).
 - Tests: `tests/test_compliance_check.py` using pytest.
-- Input validation must be added at function entry point (currently absent).
+- Input validation is implemented at the function entry point via `ComplianceRequestValidator` (Pydantic); returns HTTP 400 with field-level error detail on invalid input.
 - HTTP 400 with descriptive JSON error for invalid input.

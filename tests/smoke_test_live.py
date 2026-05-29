@@ -4,10 +4,25 @@ Requires:  pip install requests
 Run:       python tests/smoke_test_live.py
 """
 
+import os
 import sys
 import requests
 
+# ---------------------------------------------------------------------------
+# Resolve URLs: prefer .env.local overrides, fall back to defaults
+# ---------------------------------------------------------------------------
+_env_local = os.path.join(os.path.dirname(__file__), "..", ".env.local")
+if os.path.exists(_env_local):
+    for line in open(_env_local):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            os.environ.setdefault(k.strip(), v.strip())
+
 BASE = "https://us-central1-voice-sales-agent.cloudfunctions.net"
+COMPLIANCE_CHECK_URL = os.environ.get(
+    "COMPLIANCE_CHECK_URL", f"{BASE}/compliance_check"
+)
 PROFILE = {
     "age": 35,
     "income": 1_200_000,
@@ -115,4 +130,140 @@ if errors:
     sys.exit(1)
 else:
     print(f"ALL PASSED — end-to-end pipeline verified on live GCP")
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# TASK-052: Compliance smoke — age-ineligible product rejection
+# ---------------------------------------------------------------------------
+
+def smoke_compliance_age_rejection():
+    """POST age=70 profile + max_age=65 product → rejected with correct reason."""
+    print("\n=== TASK-052: compliance_check — AGE_MAX rejection ===")
+    r = requests.post(
+        COMPLIANCE_CHECK_URL,
+        json={
+            "candidate_products": [{
+                "id": "SMOKE_AGE",
+                "name": "SeniorBlock Plan",
+                "min_age": 18,
+                "max_age": 65,
+                "smoker_eligible": True,
+                "min_income": 100_000,
+                "medical_required_above": 50_000_000,
+            }],
+            "customer_profile": {
+                "age": 70,
+                "income": 500_000,
+                "smoker": False,
+                "health_status": "healthy",
+                "sum_need": 1_000_000,
+            },
+        },
+        timeout=15,
+    )
+    check("TASK-052: HTTP 200", r.status_code == 200, r.text[:200])
+    d = r.json()
+    check("TASK-052: passed is empty", d.get("passed") == [])
+    check("TASK-052: 1 rejected entry", len(d.get("rejected", [])) == 1)
+    reasons = d.get("rejected", [{}])[0].get("reasons", [])
+    check("TASK-052: reason contains 'Maximum entry age is 65'",
+          any("Maximum entry age is 65" in r for r in reasons), str(reasons))
+    check("TASK-052: reason contains 'customer is 70'",
+          any("customer is 70" in r for r in reasons), str(reasons))
+    print(f"  rejection reasons: {reasons}")
+
+
+# ---------------------------------------------------------------------------
+# TASK-053: Compliance smoke — smoker exclusion rejection
+# ---------------------------------------------------------------------------
+
+def smoke_compliance_smoker_rejection():
+    """POST smoker=true profile + smoker_eligible=false product → rejected."""
+    print("\n=== TASK-053: compliance_check — SMOKER_EXCLUSION rejection ===")
+    r = requests.post(
+        COMPLIANCE_CHECK_URL,
+        json={
+            "candidate_products": [{
+                "id": "SMOKE_SMOKER",
+                "name": "NoSmoke Term Plan",
+                "min_age": 18,
+                "max_age": 65,
+                "smoker_eligible": False,
+                "min_income": 100_000,
+                "medical_required_above": 50_000_000,
+            }],
+            "customer_profile": {
+                "age": 35,
+                "income": 600_000,
+                "smoker": True,
+                "health_status": "healthy",
+                "sum_need": 2_000_000,
+            },
+        },
+        timeout=15,
+    )
+    check("TASK-053: HTTP 200", r.status_code == 200, r.text[:200])
+    d = r.json()
+    check("TASK-053: passed is empty", d.get("passed") == [])
+    check("TASK-053: 1 rejected entry", len(d.get("rejected", [])) == 1)
+    reasons = d.get("rejected", [{}])[0].get("reasons", [])
+    check("TASK-053: reason is 'Product not available for smokers'",
+          any("not available for smokers" in r for r in reasons), str(reasons))
+    print(f"  rejection reasons: {reasons}")
+
+
+# ---------------------------------------------------------------------------
+# TASK-054: Compliance smoke — all products rejected, HTTP 200 (not error)
+# ---------------------------------------------------------------------------
+
+def smoke_compliance_all_rejected():
+    """All 3 products fail AGE_MAX → passed=[], HTTP 200."""
+    print("\n=== TASK-054: compliance_check — all products rejected (graceful) ===")
+    products = [
+        {"id": f"SMOKE_ALL{i}", "name": f"AgeBlocked Plan {i}",
+         "min_age": 18, "max_age": 50, "smoker_eligible": True,
+         "min_income": 100_000, "medical_required_above": 50_000_000}
+        for i in range(1, 4)
+    ]
+    r = requests.post(
+        COMPLIANCE_CHECK_URL,
+        json={
+            "candidate_products": products,
+            "customer_profile": {
+                "age": 70,
+                "income": 500_000,
+                "smoker": False,
+                "health_status": "healthy",
+                "sum_need": 1_000_000,
+            },
+        },
+        timeout=15,
+    )
+    check("TASK-054: HTTP 200 (not 4xx/5xx)", r.status_code == 200, r.text[:200])
+    d = r.json()
+    check("TASK-054: passed is empty []", d.get("passed") == [])
+    check("TASK-054: 3 rejected entries", len(d.get("rejected", [])) == 3)
+    for entry in d.get("rejected", []):
+        check(f"TASK-054: {entry['product_id']} has non-empty reasons",
+              len(entry.get("reasons", [])) >= 1)
+    print(f"  rejected count: {len(d.get('rejected', []))}")
+
+
+# ---------------------------------------------------------------------------
+# Run compliance smoke tests
+# ---------------------------------------------------------------------------
+
+smoke_compliance_age_rejection()
+smoke_compliance_smoker_rejection()
+smoke_compliance_all_rejected()
+
+print(f"\n{'='*60}")
+if errors:
+    print(f"COMPLIANCE SMOKE FAILED — {len(errors)} assertion(s):")
+    for e in errors:
+        print(f"  - {e}")
+    sys.exit(1)
+else:
+    print(f"ALL COMPLIANCE SMOKE TESTS PASSED")
     sys.exit(0)

@@ -261,3 +261,162 @@ class TestSumNeedDefault:
         if body["rejected"]:
             for r in body["rejected"][0]["reasons"]:
                 assert "Medical exam" not in r, "MEDICAL_EXAM_REQUIRED should not fire for absent sum_need"
+
+
+# ---------------------------------------------------------------------------
+# TASK-032: All-products-rejected response shape (Story 2, P1)
+# ---------------------------------------------------------------------------
+
+class TestAllRejectedResponseShape:
+    def test_all_products_rejected_response_shape(self):
+        """3 products all failing AGE_MAX → passed=[], rejected has 3 entries each with reasons."""
+        products = [
+            _product(id="P001", name="Plan A", max_age=50),
+            _product(id="P002", name="Plan B", max_age=55),
+            _product(id="P003", name="Plan C", max_age=60),
+        ]
+        body, status = _call({
+            "candidate_products": products,
+            "customer_profile":   _profile(age=65),
+        })
+        assert status == 200
+        assert body["passed"] == []
+        assert len(body["rejected"]) == 3
+        for entry in body["rejected"]:
+            assert len(entry["reasons"]) >= 1, "Each rejected entry must have at least one reason"
+            assert entry["product_id"] in ("P001", "P002", "P003")
+
+
+# ---------------------------------------------------------------------------
+# TASK-033: Mixed pass and reject (Story 2, P1)
+# ---------------------------------------------------------------------------
+
+class TestMixedPassAndReject:
+    def test_mixed_pass_and_reject(self):
+        """1 product passes, 2 fail different rules — full dict in passed, slim dict in rejected."""
+        products = [
+            _product(id="PASS01", name="Eligible Plan", max_age=70),
+            _product(id="FAIL01", name="Age-blocked Plan", max_age=40),
+            _product(id="FAIL02", name="Smoker-blocked Plan", max_age=70, smoker_eligible=False),
+        ]
+        body, status = _call({
+            "candidate_products": products,
+            "customer_profile":   _profile(age=45, smoker=True),
+        })
+        assert status == 200
+        # passed: only PASS01 — full product dict intact
+        assert len(body["passed"]) == 1
+        assert body["passed"][0]["id"] == "PASS01"
+        assert "max_age" in body["passed"][0], "passed[] must contain full product dict"
+        # rejected: FAIL01 and FAIL02 in slim format
+        assert len(body["rejected"]) == 2
+        rejected_ids = {r["product_id"] for r in body["rejected"]}
+        assert rejected_ids == {"FAIL01", "FAIL02"}
+        for entry in body["rejected"]:
+            assert "reasons" in entry
+            assert len(entry["reasons"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# TASK-034: Multi-violation accumulation (spec edge case)
+# ---------------------------------------------------------------------------
+
+class TestMultiViolationAccumulation:
+    def test_multi_violation_accumulation(self):
+        """Product failing both AGE_MAX and SMOKER_EXCLUSION → reasons list has both strings."""
+        body, status = _call({
+            "candidate_products": [_product(max_age=40, smoker_eligible=False)],
+            "customer_profile":   _profile(age=45, smoker=True),
+        })
+        assert status == 200
+        assert body["passed"] == []
+        assert len(body["rejected"]) == 1
+        reasons = body["rejected"][0]["reasons"]
+        assert len(reasons) == 2, f"Expected 2 violation reasons, got {len(reasons)}: {reasons}"
+        assert any("Maximum entry age" in r for r in reasons), "AGE_MAX reason missing"
+        assert any("smokers" in r.lower() for r in reasons), "SMOKER_EXCLUSION reason missing"
+
+
+# ---------------------------------------------------------------------------
+# TASK-041: INCOME_MIN rule (Story 3 / Phase 4)
+# ---------------------------------------------------------------------------
+
+class TestIncomMinRule:
+    def test_min_income_rule_rejected(self):
+        """income=200_000 < product.min_income=300_000 → rejected with correct reason, only 1 reason."""
+        body, status = _call({
+            "candidate_products": [_product(min_income=300_000)],
+            "customer_profile":   _profile(age=35, income=200_000, smoker=False,
+                                            health_status="healthy", sum_need=1_000_000),
+        })
+        assert status == 200
+        assert body["passed"] == []
+        assert len(body["rejected"]) == 1
+        reasons = body["rejected"][0]["reasons"]
+        assert len(reasons) == 1, f"Only INCOME_MIN should fire, got: {reasons}"
+        assert "Minimum income requirement" in reasons[0]
+        assert "₹300,000" in reasons[0]
+        assert "₹200,000" in reasons[0]
+
+    def test_min_income_rule_passes_at_boundary(self):
+        """income == product.min_income is exactly on the boundary — should pass."""
+        body, status = _call({
+            "candidate_products": [_product(min_income=300_000)],
+            "customer_profile":   _profile(income=300_000, sum_need=1_000_000),
+        })
+        assert status == 200
+        assert len(body["passed"]) == 1
+
+    def test_product_without_min_income_always_passes_income_check(self):
+        """Product with no min_income field → INCOME_MIN rule never fires."""
+        product = _product()
+        product.pop("min_income", None)
+        body, status = _call({
+            "candidate_products": [product],
+            "customer_profile":   _profile(income=50_000),  # very low income
+        })
+        assert status == 200
+        # INCOME_MIN must not fire — min_income defaults to 0
+        if body["rejected"]:
+            for r in body["rejected"][0]["reasons"]:
+                assert "Minimum income" not in r, "INCOME_MIN should not fire for product without min_income"
+
+
+# ---------------------------------------------------------------------------
+# TASK-042: No regression after adding INCOME_MIN (Story 3 / Phase 4)
+# ---------------------------------------------------------------------------
+
+class TestIncomeMinNoRegression:
+    """Re-run key Phase 2 passing scenarios to confirm INCOME_MIN doesn't break them."""
+
+    def test_no_regression_healthy_all_rules_pass(self):
+        """Standard passing profile still passes all 6 rules after INCOME_MIN added."""
+        body, status = _call({
+            "candidate_products": [_product(min_income=300_000)],
+            "customer_profile":   _profile(age=35, income=1_200_000, smoker=False,
+                                            health_status="healthy", sum_need=5_000_000),
+        })
+        assert status == 200
+        assert len(body["passed"]) == 1
+        assert body["rejected"] == []
+
+    def test_no_regression_age_max_still_rejects(self):
+        """AGE_MAX still rejects correctly — INCOME_MIN doesn't mask it."""
+        body, status = _call({
+            "candidate_products": [_product(max_age=30, min_income=300_000)],
+            "customer_profile":   _profile(age=35, income=1_200_000),
+        })
+        assert status == 200
+        assert body["passed"] == []
+        assert any("Maximum entry age" in r
+                   for r in body["rejected"][0]["reasons"])
+
+    def test_no_regression_smoker_exclusion_still_rejects(self):
+        """SMOKER_EXCLUSION still rejects correctly — INCOME_MIN doesn't mask it."""
+        body, status = _call({
+            "candidate_products": [_product(smoker_eligible=False, min_income=300_000)],
+            "customer_profile":   _profile(smoker=True, income=1_200_000),
+        })
+        assert status == 200
+        assert body["passed"] == []
+        assert any("smokers" in r.lower() for r in body["rejected"][0]["reasons"])

@@ -63,6 +63,15 @@ COMPLIANCE_RULES = [
         ),
         "reason": lambda p, c: "Medical exam required for this sum assured with declared health conditions",
     },
+    {
+        "rule_id": "INCOME_MIN",
+        # min_income defaults to 0 if absent — rule never fires for products without a floor.
+        "check":  lambda p, c: c.get("income", 0) >= p.get("min_income", 0),
+        "reason": lambda p, c: (
+            f"Minimum income requirement is \u20b9{p.get('min_income', 0):,}; "
+            f"customer income is \u20b9{c.get('income', 0):,}"
+        ),
+    },
 ]
 
 
