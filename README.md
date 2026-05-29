@@ -72,11 +72,13 @@ Dialogflow CX (Cloud STT streaming)
 [Sub-Agent 1]    [Sub-Agent 2]       [Sub-Agent 3]
 Product Search   Compliance Guard    Recommendation Explainer
     │                 │                     │
-[Elastic MCP]   [compliance_check     [rank_products
- search tool     Cloud Function]       Cloud Function]
- ELSER hybrid
-    │
-[Elasticsearch Cloud — ELSER v2 semantic_text — insurance_products index]
+[product_search  [compliance_check    [rank_products
+ Cloud Function]  Cloud Function]      Cloud Function]
+    │  POST /mcp
+[Elastic MCP Server]  ← Constitution §VI primary search integration
+ Cloud Run · FastMCP · search_products tool
+    │  elasticsearch-py
+[Elasticsearch Cloud Serverless — ELSER v2 semantic_text — insurance_products_current]
     │
 Cloud TTS WaveNet → Voice Response
 ```
@@ -86,7 +88,7 @@ Cloud TTS WaveNet → Voice Response
 | Decision | Choice | Rationale |
 |---|---|---|
 | Primary orchestrator | Google Cloud Agent Builder (multi-agent ADK) | Hackathon requirement; native supervisor pattern |
-| Search AI | Elasticsearch + ELSER v2 via Elastic MCP | Sparse vector semantic search; Elastic partner requirement |
+| Search AI | Elasticsearch + ELSER v2 via Elastic MCP Server | Sparse vector semantic search; Elastic partner requirement §VI |
 | Guardrail implementation | Cloud Function (deterministic rule engine) | Fast, testable, zero hallucination risk for compliance logic |
 | Voice | Dialogflow CX + Cloud STT + Cloud TTS WaveNet | Native GCP integration; low-latency streaming |
 | LLM | Gemini 2.0 Flash | Speed + cost; sufficient for intake parsing + explanation |
@@ -107,13 +109,18 @@ insure-voice-agent/
 ├── ingest/                        # Elasticsearch setup + ingestion scripts
 │   ├── create_index.py            # Index schema + ELSER inference endpoint
 │   └── index_products.py          # Bulk ingest script
-├── functions/                     # Google Cloud Functions
-│   ├── compliance_check/          # Guardrail: eligibility rule engine
+├── functions/                     # Google Cloud services
+│   ├── elastic_mcp_server/        # Elastic MCP Server (Cloud Run) — §VI primary search integration
+│   │   ├── main.py                # FastMCP + FastAPI: search_products REST + MCP tool → Elasticsearch
+│   │   ├── requirements.txt       # fastmcp, fastapi, elasticsearch, uvicorn
+│   │   └── Dockerfile             # Cloud Run container image
+│   ├── compliance_check/          # Cloud Function: deterministic eligibility rule engine
 │   │   └── main.py
-│   └── rank_products/             # Top-3 scorer + ranking
+│   └── rank_products/             # Cloud Function: top-3 scorer + ranking
 │       └── main.py
 ├── agent_builder/                 # Agent Builder configurations
 │   ├── root_agent_prompt.md       # Supervisor system prompt
+│   ├── sub_agent1_search_prompt.md # Sub-Agent 1 (Product Search) delegation prompt
 │   └── tools.yaml                 # OpenAPI specs for Cloud Function tools
 ├── dialogflow/                    # Dialogflow CX agent export
 ├── infra/                         # Infrastructure as code
@@ -162,27 +169,10 @@ gcloud services enable \
 
 ### Elastic Cloud Setup
 
-1. Create a deployment on [Elastic Cloud](https://cloud.elastic.co) with ML tier enabled
-2. Create ELSER inference endpoint:
-```bash
-PUT _inference/sparse_embedding/elser-v2-endpoint
-{
-  "service": "elasticsearch",
-  "service_settings": {
-    "adaptive_allocations": { "enabled": true, "min_number_of_allocations": 1 },
-    "num_threads": 1,
-    "model_id": ".elser_model_2"
-  }
-}
-```
-3. Run Elastic MCP server:
-```bash
-docker run \
-  -e ES_URL=https://your-deployment.es.io:443 \
-  -e ES_API_KEY=your_api_key \
-  -p 3000:3000 \
-  docker.elastic.co/mcp/elasticsearch
-```
+1. Create an **Elastic Cloud Serverless** project at [cloud.elastic.co](https://cloud.elastic.co) (Elasticsearch Serverless).
+   - Serverless uses the built-in Elastic Inference Service (EIS) for `semantic_text` fields — no manual ELSER endpoint creation required.
+2. Copy your **Cloud ID / endpoint URL** and an **API Key** with `indices:data/write` and `indices:admin/create` permissions into your `.env`.
+3. Run the ingest scripts (see below) — ELSER inference is applied automatically on ingestion.
 
 ### Ingest Insurance Product Catalog
 
@@ -195,12 +185,29 @@ python index_products.py
 
 ### Deploy Cloud Functions
 
-```bash
-cd functions/compliance_check
-gcloud functions deploy compliance_check --runtime python311 --trigger-http --allow-unauthenticated
+Use Cloud Build for a full pipeline deploy (copies shared/ module, sets secrets, deploys all three functions):
 
-cd ../rank_products
-gcloud functions deploy rank_products --runtime python311 --trigger-http --allow-unauthenticated
+```bash
+gcloud builds submit \
+  --substitutions=_ES_URL=https://<your-deployment>.es.io:443,_ES_API_KEY_SECRET=ES_API_KEY,_REGION=us-central1
+```
+
+Or deploy individually:
+
+```bash
+# compliance_check
+cp -r shared/ functions/compliance_check/shared/
+gcloud functions deploy compliance_check --runtime python311 --trigger-http --allow-unauthenticated --source=functions/compliance_check
+
+# rank_products
+cp -r shared/ functions/rank_products/shared/
+gcloud functions deploy rank_products --runtime python311 --trigger-http --allow-unauthenticated --source=functions/rank_products
+
+# product_search (no shared/ dependency)
+gcloud functions deploy product_search --runtime python311 --trigger-http --allow-unauthenticated \
+  --source=functions/product_search \
+  --set-env-vars=ES_URL=https://<your-deployment>.es.io:443 \
+  --set-secrets=ES_API_KEY=ES_API_KEY:latest
 ```
 
 ---
@@ -259,7 +266,7 @@ pytest tests/test_compliance_check.py -v
 pytest tests/ --tb=short
 ```
 
-Expected output: **113 passed** across 6 test files.
+Expected output: **155 passed** across 7 test files.
 
 ### Validate OpenAPI Spec
 

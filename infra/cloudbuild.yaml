@@ -1,15 +1,70 @@
 # Cloud Build CI/CD Pipeline — InsureVoice
+#
+# Deployment order:
+#   1. Build + push Elastic MCP Server Docker image
+#   2. Deploy Elastic MCP Server to Cloud Run (captures service URL)
+#   3. Copy shared/ into compliance_check, deploy compliance_check CF
+#   4. Copy shared/ into rank_products, deploy rank_products CF
+#
+# NOTE: product_search Cloud Function is REMOVED.
+#       Agent Builder calls the Elastic MCP Server's REST endpoint directly:
+#         POST $ELASTIC_MCP_SERVER_URL/search_products
+#       The MCP server also exposes POST $ELASTIC_MCP_SERVER_URL/mcp for MCPToolset clients.
 steps:
-  # Step 1: Copy shared/ module into compliance_check package before deploy
-  # Required: compliance_check/main.py imports from shared.validation — the module
-  # must be present inside the deployment source directory at deploy time.
+
+  # ---------------------------------------------------------------------------
+  # Step 1: Build Elastic MCP Server Docker image
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/elastic-mcp-server
+      - functions/elastic_mcp_server
+
+  # ---------------------------------------------------------------------------
+  # Step 2a: Push image to Container Registry
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/elastic-mcp-server
+
+  # ---------------------------------------------------------------------------
+  # Step 2b: Deploy Elastic MCP Server to Cloud Run.
+  #          ES_API_KEY is read from Secret Manager; ES_URL is a substitution.
+  #          The service URL is written to /workspace/mcp_url.txt for Agent Builder
+  #          console tool registration (set PRODUCT_SEARCH_URL = $MCP_URL/search_products).
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud run deploy elastic-mcp-server \
+          --image=gcr.io/$PROJECT_ID/elastic-mcp-server \
+          --platform=managed \
+          --region=${_REGION} \
+          --allow-unauthenticated \
+          --port=8080 \
+          --set-env-vars=ES_URL=${_ES_URL} \
+          --set-secrets=ES_API_KEY=${_ES_API_KEY_SECRET}:latest
+        MCP_URL=$(gcloud run services describe elastic-mcp-server \
+          --region=${_REGION} --format='value(status.url)')
+        echo "Elastic MCP Server URL: $MCP_URL"
+        echo "Agent Builder tool URL: $MCP_URL/search_products"
+        echo -n "$MCP_URL" > /workspace/mcp_url.txt
+
+  # ---------------------------------------------------------------------------
+  # Step 3: Copy shared/ module into compliance_check package before deploy
+  # ---------------------------------------------------------------------------
   - name: 'ubuntu'
     entrypoint: bash
     args:
       - -c
       - cp -r shared/ functions/compliance_check/shared/
 
-  # Step 2: Deploy compliance_check Cloud Function
+  # Step 4: Deploy compliance_check Cloud Function
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -23,15 +78,16 @@ steps:
       - --entry-point=compliance_check
       - --region=${_REGION}
 
-  # Step 3: Copy shared/ module into rank_products package before deploy
-  # Required: rank_products/main.py imports from shared.validation — same reason.
+  # ---------------------------------------------------------------------------
+  # Step 5: Copy shared/ module into rank_products package before deploy
+  # ---------------------------------------------------------------------------
   - name: 'ubuntu'
     entrypoint: bash
     args:
       - -c
       - cp -r shared/ functions/rank_products/shared/
 
-  # Step 4: Deploy rank_products Cloud Function
+  # Step 6: Deploy rank_products Cloud Function
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -45,21 +101,120 @@ steps:
       - --entry-point=rank_products
       - --region=${_REGION}
 
-  # Step 5: Deploy product_search Cloud Function (no shared/ dependency)
+substitutions:
+  _REGION: us-central1
+  _ES_URL: ''                  # Override: --substitutions=_ES_URL=https://...
+  _ES_API_KEY_SECRET: ES_API_KEY  # GCP Secret Manager secret name
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+  # ---------------------------------------------------------------------------
+  # Step 1: Build Elastic MCP server Docker image
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/elastic-mcp-server
+      - functions/elastic_mcp_server
+
+  # ---------------------------------------------------------------------------
+  # Step 2a: Push image to Container Registry
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/elastic-mcp-server
+
+  # ---------------------------------------------------------------------------
+  # Step 2b: Deploy Elastic MCP server to Cloud Run and capture its URL.
+  #          ES_API_KEY is read from Secret Manager; ES_URL is a substitution.
+  #          The URL is written to /workspace/mcp_url.txt for use in Step 5.
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud run deploy elastic-mcp-server \
+          --image=gcr.io/$PROJECT_ID/elastic-mcp-server \
+          --platform=managed \
+          --region=${_REGION} \
+          --allow-unauthenticated \
+          --port=8080 \
+          --set-env-vars=ES_URL=${_ES_URL} \
+          --set-secrets=ES_API_KEY=${_ES_API_KEY_SECRET}:latest
+        MCP_URL=$(gcloud run services describe elastic-mcp-server \
+          --region=${_REGION} --format='value(status.url)')
+        echo -n "$MCP_URL" > /workspace/mcp_url.txt
+        echo "Elastic MCP server deployed at: $MCP_URL"
+
+  # ---------------------------------------------------------------------------
+  # Step 3: Copy shared/ module into compliance_check package before deploy
+  # ---------------------------------------------------------------------------
+  - name: 'ubuntu'
+    entrypoint: bash
+    args:
+      - -c
+      - cp -r shared/ functions/compliance_check/shared/
+
+  # Step 4: Deploy compliance_check Cloud Function
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - functions
       - deploy
-      - product_search
+      - compliance_check
       - --runtime=python311
       - --trigger-http
       - --allow-unauthenticated
-      - --source=functions/product_search
-      - --entry-point=product_search
+      - --source=functions/compliance_check
+      - --entry-point=compliance_check
       - --region=${_REGION}
-      - --set-env-vars=ES_URL=${_ES_URL}
-      - --set-secrets=ES_API_KEY=${_ES_API_KEY_SECRET}:latest
+
+  # ---------------------------------------------------------------------------
+  # Step 5: Copy shared/ module into rank_products package before deploy
+  # ---------------------------------------------------------------------------
+  - name: 'ubuntu'
+    entrypoint: bash
+    args:
+      - -c
+      - cp -r shared/ functions/rank_products/shared/
+
+  # Step 6: Deploy rank_products Cloud Function
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - functions
+      - deploy
+      - rank_products
+      - --runtime=python311
+      - --trigger-http
+      - --allow-unauthenticated
+      - --source=functions/rank_products
+      - --entry-point=rank_products
+      - --region=${_REGION}
+
+  # ---------------------------------------------------------------------------
+  # Step 7: Deploy product_search Cloud Function.
+  #         Reads ELASTIC_MCP_URL from /workspace/mcp_url.txt (written in Step 2b).
+  #         No direct Elasticsearch credentials needed — the MCP server holds those.
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        MCP_URL=$(cat /workspace/mcp_url.txt)
+        gcloud functions deploy product_search \
+          --runtime=python311 \
+          --trigger-http \
+          --allow-unauthenticated \
+          --source=functions/product_search \
+          --entry-point=product_search \
+          --region=${_REGION} \
+          --set-env-vars=ELASTIC_MCP_URL=$MCP_URL
 
 substitutions:
   _REGION: us-central1

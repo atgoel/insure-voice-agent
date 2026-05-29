@@ -3,9 +3,12 @@
 # This file registers the three Sub-Agent tools used by the Root Agent (Insurance Sales Supervisor).
 #
 # Tool ownership:
-#   elastic_product_search  — Elastic MCP server (ELSER v2 hybrid search on insurance_products_current)
-#                             Primary search integration as required by hackathon judging criteria.
-#                             Env var: none — the MCP server manages its own connection.
+#   elastic_product_search  — Elastic MCP Server (Cloud Run) — Constitution §VI primary search integration.
+#                             Agent Builder calls POST $ELASTIC_MCP_SERVER_URL/search_products directly.
+#                             No Cloud Function wrapper. The MCP server owns:
+#                               _validate(), _build_query(), RRF hybrid search, elser_score injection.
+#                             MCP server also exposes POST /mcp (JSON-RPC) for MCPToolset clients.
+#                             Env var in Agent Builder console: PRODUCT_SEARCH_URL = $MCP_URL/search_products
 #
 #   compliance_check        — Cloud Function (functions/compliance_check/main.py)
 #                             Deterministic eligibility rule engine. Zero LLM involvement (Constitution §II).
@@ -25,17 +28,22 @@ info:
 paths:
 
   # ---------------------------------------------------------------------------
-  # Tool 1: Elastic MCP — ELSER v2 Hybrid Search (TASK-041)
+  # Tool 1: elastic_product_search — Elastic MCP Server REST endpoint
+  # Agent Builder calls POST $MCP_SERVER_URL/search_products directly (no CF wrapper)
+  # MCP Server: validates input, builds RRF query, calls Elasticsearch, injects elser_score
   # ---------------------------------------------------------------------------
   /elastic_product_search:
     post:
       operationId: elastic_product_search
-      summary: Search the insurance product catalog using ELSER v2 hybrid search via Elastic MCP
+      summary: Search the insurance product catalog using ELSER v2 hybrid search (Elastic MCP Server)
       description: >
-        Performs RRF hybrid search (semantic + BM25) over the insurance_products_current
-        Elasticsearch alias. Hard eligibility filters (age, income, smoker) are applied
-        at search time as a pre-compliance optimisation. Returns up to 10 candidate products
+        Validates input, builds an RRF hybrid query (ELSER semantic on description +
+        key_feature, BM25 on name/tags/sales_pitch), and executes it directly against
+        the insurance_products_current Elasticsearch alias via the Elastic MCP Server
+        (Cloud Run). Hard eligibility filters (age, income, smoker) are applied at
+        search time as a pre-compliance optimisation. Returns up to 10 candidate products
         with raw ELSER relevance scores for downstream compliance and ranking.
+        Constitution §VI: this service IS the primary Elastic search integration.
       requestBody:
         required: true
         content:

@@ -8,8 +8,7 @@ Asserts:
   (b) index body contains all expected fields with correct types
   (c) description and key_feature have type: semantic_text
   (d) name has type: text with a .keyword sub-field
-  (e) coverage_type field is present (TASK-022)
-  (f) --delete-existing flow calls indices.delete before indices.create
+  (e) --delete-existing flow calls indices.delete before indices.create
 """
 import importlib
 import sys
@@ -86,11 +85,6 @@ class TestIndexMapping:
         assert name_mapping["type"] == "text"
         assert name_mapping["fields"]["keyword"]["type"] == "keyword"
 
-    # (e) TASK-022: coverage_type present
-    def test_coverage_type_is_keyword(self):
-        assert "coverage_type" in self.props
-        assert self.props["coverage_type"]["type"] == "keyword"
-
     # (b) All expected fields present with correct types
     def test_eligibility_field_types(self):
         assert self.props["min_age"]["type"] == "integer"
@@ -112,7 +106,7 @@ class TestIndexMapping:
 
     def test_all_14_required_fields_present(self):
         required = {
-            "id", "product_code", "name", "product_type", "coverage_type",
+            "id", "product_code", "name", "product_type",
             "plan_category", "uin", "description", "key_feature", "sales_pitch",
             "tags", "min_age", "max_age", "smoker_eligible", "min_income",
             "max_sum_assured", "medical_required_above", "exclusions",

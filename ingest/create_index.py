@@ -39,7 +39,6 @@ INDEX_MAPPING = {
             # name: text for BM25 match queries + .keyword for exact/sort/agg
             "name":                   {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
             "product_type":           {"type": "keyword"},
-            "coverage_type":          {"type": "keyword"},   # TASK-022: added missing field
             "plan_category":          {"type": "keyword"},
             "uin":                    {"type": "keyword"},
             # Semantic fields — Serverless resolves built-in inference endpoint automatically

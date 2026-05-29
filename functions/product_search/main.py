@@ -1,6 +1,12 @@
-"""
-product_search — Cloud Function
-Sub-Agent 1: Hybrid ELSER semantic + BM25 search over the insurance product catalog.
+# DEPRECATED — this Cloud Function has been collapsed into the Elastic MCP Server.
+#
+# All logic (validation, query building, Elasticsearch execution) now lives in:
+#   functions/elastic_mcp_server/main.py
+#
+# Agent Builder calls the MCP server's REST endpoint directly:
+#   POST $ELASTIC_MCP_SERVER_URL/search_products
+#
+# This file is retained for reference only and is NOT deployed by cloudbuild.yaml.
 
 Endpoint: POST /product_search
 Input (JSON):
@@ -38,24 +44,24 @@ Architecture notes:
     product can surface even at low score, before compliance_check is called.
   - elser_score is the raw Elasticsearch _score from RRF (not normalised here);
     rank_products normalises across the batch before scoring.
+  - Constitution §VI: search routes through the Elastic MCP server (Cloud Run service).
+    This function is the adapter: it validates input, builds the Elasticsearch query,
+    and delegates execution to the MCP server's search_products tool.
   - Constitution §III: latency budget for this function is < 2s end-to-end.
 """
 import json
 import os
 
 import functions_framework
-from elasticsearch import Elasticsearch
+import httpx
 
-ES_URL = os.environ["ES_URL"]
-ES_API_KEY = os.environ["ES_API_KEY"]
+MCP_URL = os.environ["ELASTIC_MCP_URL"]
 ALIAS_NAME = "insurance_products_current"
 DEFAULT_SIZE = 10
 MAX_SIZE = 20
 
 # Required fields for input validation
 REQUIRED_FIELDS = {"query": str, "customer_age": int, "is_smoker": bool, "income": int}
-
-client = Elasticsearch(ES_URL, api_key=ES_API_KEY)
 
 
 def _validate(data: dict) -> list[str]:
@@ -169,6 +175,51 @@ def _hits_to_candidates(hits: list[dict]) -> list[dict]:
     return candidates
 
 
+def _search_via_mcp(es_query: dict) -> tuple[list[dict], int]:
+    """Delegate the search to the Elastic MCP server (Constitution §VI primary integration).
+
+    Sends a JSON-RPC tools/call request to the MCP server's search_products tool
+    via MCP Streamable HTTP transport (spec 2025-03-26). The MCP server executes
+    the Elasticsearch RRF query and returns raw hits with _score values.
+
+    Args:
+        es_query: Full Elasticsearch Retrievers API query body produced by _build_query.
+
+    Returns:
+        (hits, total) where hits is the list of raw Elasticsearch hit dicts.
+
+    Raises:
+        RuntimeError: on MCP-level JSON-RPC error.
+        httpx.HTTPStatusError: on HTTP 4xx/5xx from the MCP server.
+        httpx.TimeoutException: if the MCP server exceeds 5 s.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tools/call",
+        "params": {
+            "name": "search_products",
+            "arguments": {
+                "index": ALIAS_NAME,
+                "query": es_query,
+            },
+        },
+    }
+    resp = httpx.post(
+        f"{MCP_URL}/mcp",
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=5.0,
+    )
+    resp.raise_for_status()
+    rpc = resp.json()
+    if "error" in rpc:
+        raise RuntimeError(rpc["error"]["message"])
+    # FastMCP serialises the tool return dict as JSON text in content[0]["text"]
+    result_data = json.loads(rpc["result"]["content"][0]["text"])
+    return result_data["hits"], result_data["total"]
+
+
 @functions_framework.http
 def product_search(request):
     """Cloud Function entry point — POST /product_search."""
@@ -206,16 +257,13 @@ def product_search(request):
             size=size,
             relax_age=relax_age,
         )
-        response = client.search(index=ALIAS_NAME, body=es_query)
+        hits, total = _search_via_mcp(es_query)
     except Exception as exc:  # noqa: BLE001
         return (
             json.dumps({"error": "search_error", "detail": str(exc)}),
             500,
             {"Content-Type": "application/json"},
         )
-
-    hits = response["hits"]["hits"]
-    total = response["hits"]["total"]["value"]
     candidates = _hits_to_candidates(hits)
 
     result = {
