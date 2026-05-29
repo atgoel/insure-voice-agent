@@ -84,6 +84,7 @@ steps:
           --platform=managed \
           --region=${_REGION} \
           --port=8080 \
+          --min-instances=1 \
           --set-env-vars=ES_URL=${_ES_URL} \
           --set-secrets=ES_API_KEY=ES_API_KEY:latest
 
@@ -244,6 +245,7 @@ steps:
           --region=${_REGION} \
           --allow-unauthenticated \
           --port=8080 \
+          --min-instances=1 \
           --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,ELASTIC_MCP_SERVER_NATIVE_URL=$$MCP_NATIVE_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
 
         AGENT_URL=$$(gcloud run services describe insure-voice-agent \

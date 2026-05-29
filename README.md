@@ -290,6 +290,62 @@ python ingest/index_products.py
 
 ---
 
+## Usage
+
+### Invoke the InsureVoice Agent
+
+The deployed agent exposes two endpoints on Cloud Run.
+
+**Health check**
+
+```bash
+curl https://insure-voice-agent-1055350728739.us-central1.run.app/health
+# {"status":"ok","agent":"insure-voice","project":"voice-sales-agent","location":"us-central1"}
+```
+
+**Single-turn recommendation**
+
+```bash
+curl -X POST https://insure-voice-agent-1055350728739.us-central1.run.app/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "I am 35 years old, non-smoker, annual income 1.2 million INR. I need term life cover for my family of four."
+  }'
+```
+
+Response:
+
+```json
+{
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "response": "Based on your profile, here are my top three recommendations. First, SecureLife Term Plan — ₹1 crore cover at roughly ₹8,000 per year, ideal for a 35-year-old with your income. Second, FamilyShield Plus offers broader riders at ₹9,500 per year. Third, PureProtect Term covers you up to age 75 with a waiver of premium benefit. Would you like to know more about any of these?"
+}
+```
+
+**Multi-turn follow-up** (pass `session_id` from the first response)
+
+```bash
+# Follow-up: ask for more detail on the first recommendation
+curl -X POST https://insure-voice-agent-1055350728739.us-central1.run.app/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Tell me more about the first one.",
+    "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  }'
+
+# Profile reset: start over with a different budget
+curl -X POST https://insure-voice-agent-1055350728739.us-central1.run.app/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Let me try with a different budget — income is now 2 million INR.",
+    "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  }'
+```
+
+The agent maintains full session context for follow-up questions. Passing a new `session_id` (or omitting it) starts a fresh conversation.
+
+---
+
 
 
 | Item | Cost |

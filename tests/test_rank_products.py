@@ -306,3 +306,132 @@ class TestValidation:
         resp = rank_products(req)
         body_str, status, _ = resp
         assert status == 400
+
+
+# ---------------------------------------------------------------------------
+# TASK-064 / TASK-065: sum_need edge cases → income_fit defaults to 0.5
+# ---------------------------------------------------------------------------
+
+class TestIncomeFitEdgeCases:
+    def test_sum_need_zero_income_fit_default(self):
+        """TASK-064: sum_need=0 → income_fit == 0.5 (no ZeroDivisionError)."""
+        products = normalise_scores([_product().copy()])
+        scores = score_product(products[0], {"age": 35, "income": 1_200_000, "sum_need": 0})
+        assert scores["score_breakdown"]["income_fit"] == 0.5
+
+    def test_sum_need_absent_income_fit_default(self):
+        """TASK-065: profile with no sum_need key → income_fit == 0.5."""
+        products = normalise_scores([_product().copy()])
+        scores = score_product(products[0], {"age": 35, "income": 1_200_000})
+        assert scores["score_breakdown"]["income_fit"] == 0.5
+
+    def test_sum_need_zero_via_http(self):
+        """sum_need=0 does not cause a server error — returns HTTP 200."""
+        body, status = _call({
+            "passed_products": [_product()],
+            "customer_profile": {"age": 35, "income": 1_200_000, "sum_need": 0},
+        })
+        assert status == 200
+        assert body["top3"][0]["score_breakdown"]["income_fit"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# TASK-066 / TASK-067: min_age == max_age (point range) edge cases
+# ---------------------------------------------------------------------------
+
+class TestPointAgeRange:
+    def test_point_age_range_exact_match(self):
+        """TASK-066: product min_age=max_age=40, customer age=40 → age_centrality == 1.0."""
+        products = normalise_scores([_product("EXACT", min_age=40, max_age=40).copy()])
+        scores = score_product(products[0], {"age": 40, "income": 1_000_000, "sum_need": 0})
+        assert scores["score_breakdown"]["age_centrality"] == 1.0
+
+    def test_point_age_range_mismatch(self):
+        """TASK-067: product min_age=max_age=40, customer age=41 → age_centrality == 0.0 (not negative)."""
+        products = normalise_scores([_product("MISS", min_age=40, max_age=40).copy()])
+        scores = score_product(products[0], {"age": 41, "income": 1_000_000, "sum_need": 0})
+        assert scores["score_breakdown"]["age_centrality"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TASK-068: Fewer than 3 passed products — no padding
+# ---------------------------------------------------------------------------
+
+class TestFewProducts:
+    def test_two_products_returns_two_in_top3(self):
+        """TASK-068: 2 passed_products → len(top3)==2, no padding, no error."""
+        body, status = _call({
+            "passed_products": [_product("A"), _product("B")],
+            "customer_profile": _profile(),
+        })
+        assert status == 200
+        assert len(body["top3"]) == 2
+
+    def test_two_products_ranks_are_sequential(self):
+        """Ranks must be 1, 2 — not 1, 3 or 0-indexed."""
+        body, _ = _call({
+            "passed_products": [_product("A", elser_score=5.0), _product("B", elser_score=2.0)],
+            "customer_profile": _profile(),
+        })
+        assert [item["rank"] for item in body["top3"]] == [1, 2]
+
+    def test_one_product_returns_one_in_top3(self):
+        body, status = _call({
+            "passed_products": [_product("ONLY")],
+            "customer_profile": _profile(),
+        })
+        assert status == 200
+        assert len(body["top3"]) == 1
+        assert body["top3"][0]["rank"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TASK-069: Missing elser_score defaults to neutral (not 0.0)
+# ---------------------------------------------------------------------------
+
+class TestElserScoreAbsent:
+    def test_elser_score_absent_defaults_to_neutral(self):
+        """TASK-069: product with no elser_score key → elser_relevance > 0.0 (neutral, not worst-case)."""
+        p = {
+            "id": "NOELS",
+            "name": "No ELSER Product",
+            "min_age": 18,
+            "max_age": 65,
+            # elser_score deliberately omitted
+        }
+        products = normalise_scores([p.copy()])
+        scores = score_product(products[0], {"age": 35, "income": 1_200_000, "sum_need": 0})
+        assert scores["score_breakdown"]["elser_relevance"] > 0.0
+
+    def test_elser_score_absent_batch_with_present_score(self):
+        """A product missing elser_score should not dominate over one with a real score."""
+        p_no_score = {"id": "NOELS", "name": "No Score", "min_age": 18, "max_age": 65}
+        p_high_score = _product("HIGH", elser_score=10.0)
+        body, status = _call({
+            "passed_products": [p_no_score, p_high_score],
+            "customer_profile": _profile(),
+        })
+        assert status == 200
+        # The product with an explicit high elser_score should rank first
+        assert body["top3"][0]["product"]["id"] == "HIGH"
+
+
+# ---------------------------------------------------------------------------
+# TASK-081: Audit all_scored covers ALL inputs (not just top-3)
+# ---------------------------------------------------------------------------
+
+class TestAuditAllScored:
+    def test_audit_all_scored_covers_all_inputs(self):
+        """TASK-081: 7 passed_products → audit.all_scored has 7 entries, not just 3."""
+        products = [_product(f"P{i}", elser_score=float(i)) for i in range(1, 8)]
+        body, status = _call({"passed_products": products, "customer_profile": _profile()})
+        assert status == 200
+        assert len(body["audit"]["all_scored"]) == 7
+
+    def test_audit_all_scored_ids_match_input(self):
+        """All input product IDs appear in audit.all_scored."""
+        products = [_product(f"X{i}") for i in range(5)]
+        body, _ = _call({"passed_products": products, "customer_profile": _profile()})
+        audit_ids = {p["id"] for p in body["audit"]["all_scored"]}
+        input_ids = {p["id"] for p in products}
+        assert audit_ids == input_ids

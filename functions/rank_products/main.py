@@ -56,11 +56,14 @@ def normalise_scores(products: list[dict]) -> list[dict]:
     the result as elser_score_normalised. Handles all-zero and single-product
     edge cases by setting elser_score_normalised=1.0 for all items.
 
+    Products with a missing elser_score field default to 0.5 (neutral signal)
+    rather than 0.0 to avoid unfairly penalising products with no relevance data.
+
     The raw elser_score field is preserved unchanged for the audit trail.
     """
-    max_score = max((p.get("elser_score", 0.0) for p in products), default=0.0)
+    max_score = max((p.get("elser_score", 0.5) for p in products), default=0.0)
     for p in products:
-        raw = p.get("elser_score", 0.0)
+        raw = p.get("elser_score", 0.5)
         p["elser_score_normalised"] = round(raw / max_score, 6) if max_score > 0 else 1.0
     return products
 
@@ -202,5 +205,10 @@ def rank_products(request):
         "formula_weights":       FORMULA_WEIGHTS,
         "customer_profile_hash": profile_hash,
     }
+
+    # --- Cloud Logging (TASK-080 / Constitution §IV) ------------------------
+    # Cloud Functions stdout is captured as structured JSON logs automatically.
+    # Filter in Log Explorer: jsonPayload.event="rank_products_audit"
+    print(json.dumps({"event": "rank_products_audit", **audit}))
 
     return json.dumps({"top3": top3, "audit": audit}), 200, {"Content-Type": "application/json"}

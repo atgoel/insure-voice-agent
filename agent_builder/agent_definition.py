@@ -30,6 +30,7 @@ import os
 import httpx
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
+from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StreamableHTTPConnectionParams
 
 # ---------------------------------------------------------------------------
@@ -85,9 +86,16 @@ def search_products(
     }
     if product_type is not None:
         payload["product_type"] = product_type
-    resp = httpx.post(f"{ELASTIC_MCP_SERVER_URL}/search_products", json=payload, timeout=8.0)
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = httpx.post(f"{ELASTIC_MCP_SERVER_URL}/search_products", json=payload, timeout=2.5)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.TimeoutException as exc:
+        return {"candidates": [], "error": f"search_products timed out: {exc}"}
+    except httpx.HTTPStatusError as exc:
+        return {"candidates": [], "error": f"search_products HTTP {exc.response.status_code}"}
+    except Exception as exc:
+        return {"candidates": [], "error": f"search_products unavailable: {exc}"}
 
 def compliance_check(candidates: list, customer_profile: dict) -> dict:
     """Call the compliance_check Cloud Function.
@@ -107,9 +115,16 @@ def compliance_check(candidates: list, customer_profile: dict) -> dict:
     """
     # Map agent-side field names → compliance_check API field names
     payload = {"candidate_products": candidates, "customer_profile": customer_profile}
-    resp = httpx.post(COMPLIANCE_CHECK_URL, json=payload, timeout=5.0)
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = httpx.post(COMPLIANCE_CHECK_URL, json=payload, timeout=5.0)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.TimeoutException as exc:
+        return {"passed": [], "rejected": [], "error": f"compliance_check timed out: {exc}"}
+    except httpx.HTTPStatusError as exc:
+        return {"passed": [], "rejected": [], "error": f"compliance_check HTTP {exc.response.status_code}"}
+    except Exception as exc:
+        return {"passed": [], "rejected": [], "error": f"compliance_check unavailable: {exc}"}
 
 
 def rank_products(eligible_candidates: list, customer_profile: dict) -> dict:
@@ -129,9 +144,31 @@ def rank_products(eligible_candidates: list, customer_profile: dict) -> dict:
     """
     # Map agent-side field names → rank_products API field names
     payload = {"passed_products": eligible_candidates, "customer_profile": customer_profile}
-    resp = httpx.post(RANK_PRODUCTS_URL, json=payload, timeout=5.0)
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = httpx.post(RANK_PRODUCTS_URL, json=payload, timeout=5.0)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.TimeoutException:
+        # Graceful fallback: return passed products ordered by elser_score (Constitution §IV)
+        sorted_fallback = sorted(
+            eligible_candidates,
+            key=lambda p: p.get("elser_score", 0.0),
+            reverse=True,
+        )
+        return {
+            "top_3": [
+                {"rank": i + 1, "product_id": p.get("product_id", p.get("id", "")),
+                 "suitability_score": p.get("elser_score", 0.0),
+                 "score_breakdown": {"elser_relevance": p.get("elser_score", 0.0)},
+                 "explanation": p.get("name", "Product")}
+                for i, p in enumerate(sorted_fallback[:3])
+            ],
+            "warning": "rank_products timed out; results ordered by ELSER score only",
+        }
+    except httpx.HTTPStatusError as exc:
+        return {"top_3": [], "error": f"rank_products HTTP {exc.response.status_code}"}
+    except Exception as exc:
+        return {"top_3": [], "error": f"rank_products unavailable: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -170,5 +207,25 @@ root_agent = LlmAgent(
         # Tool 3: Rank products — suitability scoring (Cloud Function)
         # ---------------------------------------------------------------
         FunctionTool(rank_products),
+
+        # ---------------------------------------------------------------
+        # Tool 4: Recommendation Explainer — Sub-Agent 3 (LlmAgent)
+        # Receives top3 + customer profile summary; returns voice-ready
+        # ≤120-word explanation in plain prose (no markdown, INR, WaveNet-safe).
+        # ---------------------------------------------------------------
+        AgentTool(
+            agent=LlmAgent(
+                model="gemini-2.0-flash",
+                name="recommend_and_explain",
+                description=(
+                    "Generates a concise voice-ready recommendation explanation "
+                    "from the top-3 ranked products and customer profile. "
+                    "Output is plain prose, ≤120 words, WaveNet-safe, in INR."
+                ),
+                instruction=open(
+                    os.path.join(os.path.dirname(__file__), "sub_agent3_explainer_prompt.md")
+                ).read(),
+            )
+        ),
     ],
 )
