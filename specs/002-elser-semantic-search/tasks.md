@@ -91,6 +91,8 @@
 - [x] TASK-051 · [infra] · Verify Cloud Build builds Docker image for `functions/elastic_mcp_server` and deploys as Cloud Run service `elastic-mcp-server`; service URL logged for Agent Builder console registration — `infra/cloudbuild.yaml` ✅
 - [x] TASK-052 · [docs] · Update `README.md` — architecture diagram shows Agent Builder → Elastic MCP Server → Elasticsearch; repo structure shows `elastic_mcp_server/` service; `product_search` CF removed from deploy instructions — `README.md` ✅
 - [x] TASK-053 · [feat] · Create Elastic MCP Server Cloud Run service (`functions/elastic_mcp_server/`): `main.py` (FastMCP + FastAPI, `_validate`, `_build_query`, `_execute_search`, `POST /search_products` REST + `POST /mcp` JSON-RPC), `requirements.txt`, `Dockerfile` — **Constitution §VI primary search integration** ✅
+- [x] TASK-054 · [feat] · Create MCP-native Cloud Run service (`functions/elastic_mcp_server_native/`): FastMCP 3.3.1 as ASGI root with `mcp.http_app(stateless_http=True)`; `_HealthMiddleware` for `/health`; true `/mcp` endpoint used by ADK `MCPToolset` — `functions/elastic_mcp_server_native/main.py`, `requirements.txt`, `Dockerfile` ✅
+- [x] TASK-055 · [feat] · Create ADK agent definition (`agent_builder/agent_definition.py`): `MCPToolset(StreamableHTTPConnectionParams(url=f"{ELASTIC_MCP_SERVER_NATIVE_URL}/mcp"))` replaces `FunctionTool(search_products)`; eliminates duplicate function declaration 400 error from Gemini — `agent_builder/agent_definition.py` ✅
 
 ---
 
@@ -121,6 +123,6 @@ Phase 5 TASK-042 → Phase 6 TASK-050 (sub-agent prompt needed for E2E smoke)
 | Phase 5 — Agent Builder integration | ✅ DONE | — |
 | Phase 6 — Polish | ✅ DONE | — |
 
-**Feature 002 is complete.** All 52 tasks delivered.
+**Feature 002 is complete.** All 31 tasks delivered.
 
 **Open tasks**: 0

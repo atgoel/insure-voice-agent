@@ -36,6 +36,17 @@ steps:
       - functions/elastic_mcp_server
 
   # ---------------------------------------------------------------------------
+  # Step 1b: Build Elastic MCP Server NATIVE image (FastMCP at root — no FastAPI)
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-mcp-native-image
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/elastic-mcp-server-native
+      - functions/elastic_mcp_server_native
+
+  # ---------------------------------------------------------------------------
   # Step 2a: Push Elastic MCP Server image to Container Registry
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/cloud-builders/docker'
@@ -44,6 +55,48 @@ steps:
     args:
       - push
       - gcr.io/$PROJECT_ID/elastic-mcp-server
+
+  # ---------------------------------------------------------------------------
+  # Step 2a-native: Push Elastic MCP Server NATIVE image
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-mcp-native-image
+    waitFor: [build-mcp-native-image]
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/elastic-mcp-server-native
+
+  # ---------------------------------------------------------------------------
+  # Step 2b-native: Deploy Elastic MCP Server NATIVE to Cloud Run.
+  #   - MCP endpoint at /mcp (FastMCP mounted at Starlette root)
+  #   - MCPToolset connects to https://<this-service>/mcp
+  #   - Captures URL → /workspace/mcp_native_url.txt
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-mcp-native-server
+    waitFor: [push-mcp-native-image]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud run deploy elastic-mcp-server-native \
+          --image=gcr.io/$PROJECT_ID/elastic-mcp-server-native \
+          --platform=managed \
+          --region=${_REGION} \
+          --port=8080 \
+          --set-env-vars=ES_URL=${_ES_URL} \
+          --set-secrets=ES_API_KEY=ES_API_KEY:latest
+
+        gcloud run services add-iam-policy-binding elastic-mcp-server-native \
+          --region=${_REGION} \
+          --member=allUsers \
+          --role=roles/run.invoker || true
+
+        MCP_NATIVE_URL=$$(gcloud run services describe elastic-mcp-server-native \
+          --region=${_REGION} --format='value(status.url)')
+        echo "Elastic MCP Server NATIVE: $$MCP_NATIVE_URL"
+        echo "  MCP endpoint: $$MCP_NATIVE_URL/mcp"
+        echo -n "$$MCP_NATIVE_URL" > /workspace/mcp_native_url.txt
 
   # ---------------------------------------------------------------------------
   # Step 2b: Deploy Elastic MCP Server to Cloud Run.
@@ -175,12 +228,13 @@ steps:
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: deploy-agent-runner
-    waitFor: [push-agent-image, deploy-mcp-server, deploy-compliance-check, deploy-rank-products]
+    waitFor: [push-agent-image, deploy-mcp-server, deploy-mcp-native-server, deploy-compliance-check, deploy-rank-products]
     entrypoint: bash
     args:
       - -c
       - |
         MCP_URL=$$(cat /workspace/mcp_url.txt)
+        MCP_NATIVE_URL=$$(cat /workspace/mcp_native_url.txt)
         COMPLIANCE_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/compliance_check"
         RANK_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/rank_products"
 
@@ -190,7 +244,7 @@ steps:
           --region=${_REGION} \
           --allow-unauthenticated \
           --port=8080 \
-          --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
+          --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,ELASTIC_MCP_SERVER_NATIVE_URL=$$MCP_NATIVE_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
 
         AGENT_URL=$$(gcloud run services describe insure-voice-agent \
           --region=${_REGION} --format='value(status.url)')
@@ -209,13 +263,18 @@ steps:
       - -c
       - |
         MCP_URL=$$(cat /workspace/mcp_url.txt)
+        MCP_NATIVE_URL=$$(cat /workspace/mcp_native_url.txt)
         AGENT_URL=$$(cat /workspace/agent_url.txt)
         echo "============================================================"
         echo "  InsureVoice Deployment Summary"
         echo "============================================================"
-        echo "  elastic-mcp-server (Cloud Run)"
-        echo "    MCP endpoint:  $$MCP_URL/mcp"
+        echo "  elastic-mcp-server (Cloud Run — REST + MCP-via-FastAPI)"
         echo "    REST endpoint: $$MCP_URL/search_products"
+        echo "    MCP endpoint:  $$MCP_URL/mcp  (path: /mcp/mcp — tools.yaml)"
+        echo ""
+        echo "  elastic-mcp-server-native (Cloud Run — pure MCP at root)"
+        echo "    MCP endpoint:  $$MCP_NATIVE_URL/mcp  ← MCPToolset target"
+        echo "    Health:        $$MCP_NATIVE_URL/health"
         echo ""
         echo "  compliance_check (Cloud Function)"
         echo "    https://${_REGION}-$PROJECT_ID.cloudfunctions.net/compliance_check"

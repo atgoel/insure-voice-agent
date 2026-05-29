@@ -30,13 +30,15 @@ import os
 import httpx
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
+from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StreamableHTTPConnectionParams
 
 # ---------------------------------------------------------------------------
 # Environment — Cloud Run / Cloud Function URLs
 # ---------------------------------------------------------------------------
-ELASTIC_MCP_SERVER_URL = os.environ["ELASTIC_MCP_SERVER_URL"]   # e.g. https://elastic-mcp-server-xxxx.run.app
-COMPLIANCE_CHECK_URL   = os.environ["COMPLIANCE_CHECK_URL"]
-RANK_PRODUCTS_URL      = os.environ["RANK_PRODUCTS_URL"]
+ELASTIC_MCP_SERVER_URL        = os.environ["ELASTIC_MCP_SERVER_URL"]   # REST transport (existing)
+ELASTIC_MCP_SERVER_NATIVE_URL = os.environ["ELASTIC_MCP_SERVER_NATIVE_URL"]  # MCP-native transport
+COMPLIANCE_CHECK_URL          = os.environ["COMPLIANCE_CHECK_URL"]
+RANK_PRODUCTS_URL             = os.environ["RANK_PRODUCTS_URL"]
 
 # ---------------------------------------------------------------------------
 # HTTP call helpers for compliance_check, rank_products, and search_products
@@ -95,13 +97,16 @@ def compliance_check(candidates: list, customer_profile: dict) -> dict:
 
     Args:
         candidates: List of candidate products returned by search_products.
-        customer_profile: Anonymised customer profile dict with age, income,
-                          smoker, health_status, and sum_need fields.
+        customer_profile: Customer profile dict. Required fields:
+            age (int), income (int), smoker (bool), health_status (str: "healthy"|"pre_existing"),
+            coverage_goals (list[str]: e.g. ["life", "health"]).
+            Optional: sum_need (int), family_size (int), dependents (int).
 
     Returns:
-        {"results": [{"product_id": str, "eligible": bool, "rejection_reason": str|None}, ...]}
+        {"passed": [...full product dicts...], "rejected": [{"product_id", "product_name", "reasons"}, ...]}
     """
-    payload = {"candidates": candidates, "customer_profile": customer_profile}
+    # Map agent-side field names → compliance_check API field names
+    payload = {"candidate_products": candidates, "customer_profile": customer_profile}
     resp = httpx.post(COMPLIANCE_CHECK_URL, json=payload, timeout=5.0)
     resp.raise_for_status()
     return resp.json()
@@ -114,14 +119,16 @@ def rank_products(eligible_candidates: list, customer_profile: dict) -> dict:
     each with a full score breakdown for audit (Constitution §IV).
 
     Args:
-        eligible_candidates: Products that passed the compliance guardrail.
-        customer_profile: Anonymised customer profile dict.
+        eligible_candidates: Products that passed the compliance guardrail
+            (the "passed" list from compliance_check).
+        customer_profile: Customer profile dict (same shape as compliance_check).
 
     Returns:
         {"top_3": [{"rank": int, "product_id": str, "suitability_score": float,
                     "score_breakdown": dict, "explanation": str}, ...]}
     """
-    payload = {"eligible_candidates": eligible_candidates, "customer_profile": customer_profile}
+    # Map agent-side field names → rank_products API field names
+    payload = {"passed_products": eligible_candidates, "customer_profile": customer_profile}
     resp = httpx.post(RANK_PRODUCTS_URL, json=payload, timeout=5.0)
     resp.raise_for_status()
     return resp.json()
@@ -144,11 +151,15 @@ root_agent = LlmAgent(
     ).read(),
     tools=[
         # ---------------------------------------------------------------
-        # Tool 1: Elastic MCP Server — ELSER RRF hybrid search (REST transport)
-        # Calls our Cloud Run elastic-mcp-server /search_products endpoint.
-        # The server IS an MCP server; REST transport used for reliability.
+        # Tool 1: Elastic MCP Server NATIVE — ELSER RRF search via MCP protocol
+        # FastMCP mounted at Starlette root → /mcp is the actual MCP endpoint.
+        # MCPToolset auto-discovers 'search_products' via MCP initialize handshake.
         # ---------------------------------------------------------------
-        FunctionTool(search_products),
+        MCPToolset(
+            connection_params=StreamableHTTPConnectionParams(
+                url=f"{ELASTIC_MCP_SERVER_NATIVE_URL}/mcp",
+            )
+        ),
 
         # ---------------------------------------------------------------
         # Tool 2: Compliance check — deterministic rule engine (Cloud Function)

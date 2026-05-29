@@ -1,6 +1,26 @@
 # InsureVoice — Architecture Deep Dive
 ## Google Cloud Agent Builder + Elastic ELSER + Dialogflow CX
 
+> **Last updated**: 2026-05-29  
+> **Status**: Production — all Cloud Run services and Cloud Functions deployed, end-to-end agent invoke confirmed working.
+
+---
+
+## Deployed Services (Production)
+
+| Service | Type | URL | Transport |
+|---|---|---|---|
+| `elastic-mcp-server` | Cloud Run | `https://elastic-mcp-server-mhojvvbq4a-uc.a.run.app` | REST `/search_products` |
+| `elastic-mcp-server-native` | Cloud Run | `https://elastic-mcp-server-native-1055350728739.us-central1.run.app` | MCP `/mcp` (Streamable HTTP) |
+| `insure-voice-agent` | Cloud Run | `https://insure-voice-agent-1055350728739.us-central1.run.app` | FastAPI `/invoke`, `/health` |
+| `compliance_check` | Cloud Function (2nd gen) | `https://us-central1-voice-sales-agent.cloudfunctions.net/compliance_check` | HTTP POST |
+| `rank_products` | Cloud Function (2nd gen) | `https://us-central1-voice-sales-agent.cloudfunctions.net/rank_products` | HTTP POST |
+
+**LLM**: Gemini 2.5 Flash Lite (`gemini-2.5-flash-lite`) on Vertex AI `us-central1`  
+**GCP Project**: `voice-sales-agent` (project number `1055350728739`)  
+**Elasticsearch**: `https://my-elasticsearch-project-c2e88f.es.us-central1.gcp.elastic.cloud:443`  
+**Secret Manager**: `ES_API_KEY` secret (version 7, CRLF-free)
+
 ---
 
 ## System Overview
@@ -14,22 +34,29 @@ InsureVoice is a multi-agent AI system with four distinct functional layers. Eac
 └───────────────────────────┬─────────────────────────────────────┘
                             │ structured conversation turns
 ┌───────────────────────────▼─────────────────────────────────────┐
-│  LAYER 2 — AGENT ORCHESTRATION (Agent Builder ADK)             │
-│  Root Agent (Supervisor) · 3 Sub-Agents · Vertex AI data store │
+│  LAYER 2 — AGENT ORCHESTRATION (ADK + google-adk 2.1.0)        │
+│  insure-voice-agent (Cloud Run)                                  │
+│  LlmAgent · Gemini 2.5 Flash Lite · InMemorySessionService     │
+│  Tool 1: MCPToolset → elastic-mcp-server-native /mcp            │
+│  Tool 2: FunctionTool(compliance_check) → Cloud Function        │
+│  Tool 3: FunctionTool(rank_products) → Cloud Function           │
 └───────┬───────────────────┬──────────────────────┬─────────────┘
         │                   │                      │
 ┌───────▼───────┐  ┌────────▼────────┐  ┌──────────▼──────────┐
-│ Sub-Agent 1   │  │  Sub-Agent 2    │  │  Sub-Agent 3        │
-│ Product Search│  │  Compliance     │  │  Explainer          │
-│               │  │  Guardrail      │  │                     │
-│ Elastic MCP   │  │ Cloud Function  │  │ Cloud Function      │
-│ ELSER hybrid  │  │ compliance_check│  │ rank_products       │
+│ MCPToolset    │  │ FunctionTool    │  │ FunctionTool        │
+│ search_       │  │ compliance_     │  │ rank_products       │
+│ products      │  │ check           │  │                     │
+│               │  │                 │  │                     │
+│ elastic-mcp-  │  │ Cloud Function  │  │ Cloud Function      │
+│ server-native │  │ compliance_     │  │ rank_products       │
+│ (FastMCP +    │  │ check           │  │                     │
+│ Starlette)    │  │                 │  │                     │
 └───────┬───────┘  └─────────────────┘  └─────────────────────┘
         │
 ┌───────▼─────────────────────────────────────────────────────────┐
-│  LAYER 3 — SEARCH INTELLIGENCE (Elastic)                        │
-│  Elasticsearch Cloud · ELSER v2 · semantic_text fields          │
-│  Hybrid search: BM25 + sparse vectors + structured filters      │
+│  LAYER 3 — SEARCH INTELLIGENCE (Elastic Cloud Serverless)       │
+│  ELSER v2 · semantic_text fields · RRF hybrid retriever         │
+│  Alias: insurance_products_current (28 products)                │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,9 +96,86 @@ InsureVoice is a multi-agent AI system with four distinct functional layers. Eac
 
 ## Layer 2: Agent Orchestration
 
-### Agent Builder Multi-Agent (ADK) Architecture
+### ADK Implementation (`agent_builder/`)
 
-Agent Builder's ADK supports hierarchical multi-agent orchestration. One Root Agent (the "supervisor") delegates to specialized Sub-Agents in sequence.
+The agent is a single `LlmAgent` (not a sub-agent hierarchy) running on `google-adk 2.1.0` with three registered tools. It is served by a FastAPI Cloud Run service (`agent_builder/main.py`).
+
+```python
+# agent_builder/agent_definition.py (authoritative)
+root_agent = LlmAgent(
+    model="gemini-2.5-flash-lite",    # Vertex AI us-central1
+    name="InsureVoice",
+    tools=[
+        MCPToolset(                    # Tool 1 — MCP-native search
+            connection_params=StreamableHTTPConnectionParams(
+                url=f"{ELASTIC_MCP_SERVER_NATIVE_URL}/mcp"
+            )
+        ),
+        FunctionTool(compliance_check),  # Tool 2 — deterministic guardrail
+        FunctionTool(rank_products),     # Tool 3 — suitability scoring
+    ]
+)
+```
+
+**Environment variables** required by `insure-voice-agent` Cloud Run:
+
+| Variable | Value |
+|---|---|
+| `ELASTIC_MCP_SERVER_URL` | `https://elastic-mcp-server-mhojvvbq4a-uc.a.run.app` (REST, legacy) |
+| `ELASTIC_MCP_SERVER_NATIVE_URL` | `https://elastic-mcp-server-native-1055350728739.us-central1.run.app` |
+| `COMPLIANCE_CHECK_URL` | `https://us-central1-voice-sales-agent.cloudfunctions.net/compliance_check` |
+| `RANK_PRODUCTS_URL` | `https://us-central1-voice-sales-agent.cloudfunctions.net/rank_products` |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `TRUE` |
+| `GOOGLE_CLOUD_PROJECT` | `voice-sales-agent` |
+| `GOOGLE_CLOUD_LOCATION` | `us-central1` |
+
+### MCPToolset — Architecture Decision
+
+**Decision**: Use `MCPToolset` (MCP Streamable HTTP) for `search_products`, not `FunctionTool`.
+
+**Why**: The hackathon requires demonstrating Elastic MCP server integration. `MCPToolset` uses the real MCP JSON-RPC protocol (`initialize` → `tools/list` → `tools/call`), proving the integration is genuine.
+
+**Critical fix — FastMCP double-nesting problem**:
+
+```python
+# BROKEN (elastic-mcp-server, FastAPI outer app):
+app = FastAPI()
+app.mount("/mcp", mcp.http_app())
+# FastMCP internal route /mcp served at /mcp/mcp
+# MCPToolset gets 404 on /mcp → silently fails → tool not registered
+
+# FIXED (elastic-mcp-server-native, Starlette outer app):
+app = mcp.http_app(stateless_http=True)          # FastMCP IS the root ASGI app
+app.add_middleware(_HealthMiddleware)              # /health intercepted by middleware
+# FastMCP internal /mcp served at /mcp ✓
+# MCPToolset connects to .../mcp → works
+```
+
+**FastMCP lifespan requirement**: The `StreamableHTTPSessionManager` task group must be initialized at startup. Using `mcp.http_app()` directly as the ASGI app (rather than mounting inside a parent app) satisfies this automatically. The error `StreamableHTTPSessionManager task group was not initialized` is caused by wrapping the app in Starlette/FastAPI without forwarding the lifespan context.
+
+**`stateless_http=True`**: Required for Cloud Run (no persistent SSE connections between requests). Moved from `FastMCP()` constructor (removed in fastmcp 3.x) to `mcp.http_app(stateless_http=True)`.
+
+### Tool API Contracts
+
+**Tool 1 — MCPToolset `search_products`** (auto-discovered from `/mcp`):
+```
+Input:  query, customer_age, is_smoker, income, product_type?, size?, relax_age_filter?
+Output: {"candidates": [...], "total_hits": int, "fallback_triggered": bool}
+```
+
+**Tool 2 — `compliance_check`** (`POST /compliance_check` Cloud Function):
+```
+Input:  {"candidate_products": [...], "customer_profile": {age, income, smoker, health_status, coverage_goals}}
+Output: {"passed": [...full product dicts...], "rejected": [{"product_id", "product_name", "reasons"}]}
+```
+⚠️ Field name: `candidate_products` (not `candidates`)
+
+**Tool 3 — `rank_products`** (`POST /rank_products` Cloud Function):
+```
+Input:  {"passed_products": [...], "customer_profile": {...}}
+Output: {"top_3": [{"rank", "product_id", "suitability_score", "score_breakdown", "explanation"}]}
+```
+⚠️ Field name: `passed_products` (not `eligible_candidates`)
 
 ```
 Root Agent receives: raw voice transcript
@@ -98,156 +202,113 @@ PROCESS — always follow these steps in order:
    - Coverage goals (life, health, investment, critical illness, accident)
    - Desired sum assured (if stated)
 
-2. SEARCH: Use the Product Search Agent to find candidate products matching the profile.
+2. SEARCH: Use search_products (MCPToolset → elastic-mcp-server-native) to find candidates.
 
-3. VALIDATE: Use the Compliance Guardrail Agent to filter out ineligible products.
-   CRITICAL: Never recommend a product that the Compliance Agent has rejected.
+3. VALIDATE: Use compliance_check to filter ineligible products.
+   CRITICAL: Never recommend a product that compliance_check returned as rejected.
 
-4. EXPLAIN: Use the Recommendation Explainer Agent to rank and explain top-3 products.
+4. RANK: Use rank_products to score and rank the passed products.
 
-5. RESPOND: Deliver the top-3 recommendations in a warm, conversational voice tone.
-   Format: "Based on your profile, here are my top 3 recommendations for you..."
+5. RESPOND: Deliver the top-3 in voice-friendly tone, ≤ 120 words.
 
 GUARDRAILS:
-- Never recommend a product if the Compliance Agent returns it as rejected
-- If ALL products are rejected, explain why and ask for updated profile information
-- Never make medical or legal claims about insurance products
-- Always clarify that final underwriting is subject to insurer terms
+- Never recommend a product if compliance_check returned it as rejected
+- If ALL products are rejected, explain why and ask for updated profile
+- Never make medical or legal claims
+- Always clarify final underwriting is subject to insurer terms
 ```
 
-### Sub-Agent 1: Product Search Agent
+### Tool 1: `search_products` via MCPToolset
 
-**Tool**: Elastic MCP `search`
+**Service**: `elastic-mcp-server-native` (Cloud Run, FastMCP 3.3.1 on Starlette)  
+**MCP endpoint**: `POST /mcp` (Streamable HTTP JSON-RPC)
 
-**Input** (from Root Agent):
+**RRF Hybrid Query** (two ELSER semantic legs + one BM25 leg):
+```
+Leg A: semantic on description + semantic on key_feature
+Leg B: multi_match on name^2, tags, sales_pitch
+Hard filters: is_active, min_income ≤ income, age bounds, smoker_eligible
+rank_window_size=20, rank_constant=60
+```
+
+**Why ELSER**: "comprehensive illness protection for my family" does NOT keyword-match "Critical Illness Rider". ELSER sparse vectors encode the semantic association. BM25 returns zero; ELSER returns the correct product.
+
+### Tool 2: `compliance_check` (Cloud Function)
+
+**POST** `https://us-central1-voice-sales-agent.cloudfunctions.net/compliance_check`
+
+**Request body** (exact field names — Pydantic-validated):
 ```json
 {
-  "query": "term life insurance family protection",
-  "filters": {
-    "age_range": [35, 35],
-    "income_min": 1200000,
-    "smoker": false
+  "candidate_products": [...],
+  "customer_profile": {
+    "age": 35, "income": 800000, "smoker": false,
+    "health_status": "healthy", "coverage_goals": ["life"]
   }
 }
 ```
 
-**Elasticsearch Query** (generated from above):
+**Compliance rules** (`functions/compliance_check/main.py`):
+
+| Rule ID | Predicate |
+|---|---|
+| `AGE_MIN` | `customer.age >= product.min_age` |
+| `AGE_MAX` | `customer.age <= product.max_age` |
+| `SMOKER_EXCLUSION` | `not (smoker and not smoker_eligible)` |
+| `INCOME_SUM_CAP` | `sum_need ≤ income × 10` |
+| `MEDICAL_EXAM_REQUIRED` | `not (sum_need > medical_required_above and health_status != "healthy")` |
+
+**Why Cloud Function (not LLM)**: Constitution §II — Zero hallucination on eligibility. Rules are pure Python predicates; 100% deterministic, auditable, testable.
+
+**Response asymmetry (G8)**: `passed[]` = full product dicts; `rejected[]` = `{product_id, product_name, reasons}` only.
+
+### Tool 3: `rank_products` (Cloud Function)
+
+**POST** `https://us-central1-voice-sales-agent.cloudfunctions.net/rank_products`
+
+**Request body** (exact field names — Pydantic-validated):
 ```json
 {
-  "query": {
-    "bool": {
-      "should": [
-        {
-          "semantic": {
-            "field": "description",
-            "query": "term life insurance family protection"
-          }
-        },
-        {
-          "match": {
-            "name": { "query": "term life family", "boost": 1.5 }
-          }
-        }
-      ],
-      "filter": [
-        { "range": { "min_age": { "lte": 35 } } },
-        { "range": { "max_age": { "gte": 35 } } },
-        { "term": { "smoker_eligible": true } }
-      ],
-      "minimum_should_match": 1
-    }
-  },
-  "size": 10
+  "passed_products": [...],
+  "customer_profile": { "age": 35, "income": 800000, ... }
 }
 ```
-
-**Why ELSER over pure BM25**: A customer saying "comprehensive illness protection for my family" will NOT match "Critical Illness Rider" by keywords. ELSER's sparse vectors encode semantic association — "illness protection" → "critical illness", "family" → "family floater". BM25 would return zero results; ELSER returns the correct product.
-
-### Sub-Agent 2: Compliance Guardrail Agent
-
-**Tool**: `compliance_check` Cloud Function
-
-**Rule Set** (`functions/compliance_check/main.py`):
-
-```python
-COMPLIANCE_RULES = [
-    {
-        "rule_id": "AGE_MIN",
-        "check": lambda p, c: c["age"] >= p["min_age"],
-        "rejection_reason": lambda p, c: f"Minimum age for this product is {p['min_age']}; customer is {c['age']}"
-    },
-    {
-        "rule_id": "AGE_MAX",
-        "check": lambda p, c: c["age"] <= p["max_age"],
-        "rejection_reason": lambda p, c: f"Maximum entry age for this product is {p['max_age']}; customer is {c['age']}"
-    },
-    {
-        "rule_id": "SMOKER_EXCLUSION",
-        "check": lambda p, c: not (c["smoker"] and not p["smoker_eligible"]),
-        "rejection_reason": lambda p, c: "This product is not available for smokers"
-    },
-    {
-        "rule_id": "INCOME_SUM_CAP",
-        "check": lambda p, c: c.get("sum_need", 0) <= c["income"] * 10,
-        "rejection_reason": lambda p, c: f"Requested sum assured exceeds 10x annual income cap"
-    },
-    {
-        "rule_id": "MEDICAL_EXAM_REQUIRED",
-        "check": lambda p, c: not (c.get("sum_need", 0) > p.get("medical_required_above", float('inf')) and c.get("health_status") != "healthy"),
-        "rejection_reason": lambda p, c: "Medical examination required for this sum assured with declared health conditions"
-    }
-]
-```
-
-**Why Cloud Function (not LLM)**: Compliance rules must be 100% deterministic. An LLM can hallucinate or misapply rules. Using a Cloud Function means the guardrail is auditable, testable, and never wrong.
-
-### Sub-Agent 3: Recommendation Explainer Agent
-
-**Tool**: `rank_products` Cloud Function
 
 **Scoring Formula**:
 ```
 suitability_score = (elser_score × 0.4) + (age_centrality × 0.3) + (income_fit × 0.3)
 
-where:
-  age_centrality  = 1 - |age - product_midpoint_age| / (max_age - min_age)
-  income_fit      = min(income / (sum_need / 10), 1.0)  # how comfortably income covers premium
-```
-
-**Output** (top-3 per product):
-```json
-{
-  "rank": 1,
-  "product_name": "SecureLife Term Plan Plus",
-  "product_type": "Term Life",
-  "suitability_score": 0.87,
-  "voice_explanation": "My top recommendation is SecureLife Term Plan Plus. At your age of 35, this gives you ₹1 crore life cover at just ₹800 per month. It's designed for married professionals with dependents — exactly your situation. Critical illness is covered as a rider at no extra cost for the first year."
-}
+age_centrality = 1 - |age - product_midpoint_age| / (max_age - min_age)
+income_fit     = min(income / (sum_need / 10), 1.0)
 ```
 
 ---
 
 ## Layer 3: Search Intelligence
 
-### Elasticsearch Index Schema
+### Elasticsearch Index Schema (authoritative — `ingest/create_index.py`)
+
+**Infrastructure**: Elastic Cloud Serverless — built-in EIS. No manual inference endpoint needed.  
+**Index**: `insurance_products_v1` → **Alias**: `insurance_products_current`
 
 ```json
-PUT /insurance_products
 {
   "mappings": {
     "properties": {
       "id":                    { "type": "keyword" },
       "name":                  { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
       "product_type":          { "type": "keyword" },
-      "description":           { "type": "semantic_text", "inference_id": "elser-v2-endpoint" },
+      "description":           { "type": "semantic_text" },
+      "key_feature":           { "type": "semantic_text" },
       "min_age":               { "type": "integer" },
       "max_age":               { "type": "integer" },
       "smoker_eligible":       { "type": "boolean" },
+      "is_active":             { "type": "boolean" },
       "min_income":            { "type": "long" },
       "max_sum_assured":       { "type": "long" },
       "medical_required_above":{ "type": "long" },
-      "exclusions":            { "type": "keyword" },
-      "coverage_type":         { "type": "keyword" },
+      "tags":                  { "type": "keyword" },
+      "sales_pitch":           { "type": "text" },
       "premium_min_monthly":   { "type": "integer" },
       "premium_max_monthly":   { "type": "integer" }
     }
@@ -273,50 +334,65 @@ PUT _inference/sparse_embedding/elser-v2-endpoint
 }
 ```
 
-### Elastic MCP Server
+### Elastic MCP Server — Two Deployments
 
-```bash
-docker run \
-  --name elastic-mcp \
-  -e ES_URL=https://your-deployment.es.io:443 \
-  -e ES_API_KEY=your_base64_api_key \
-  -p 3000:3000 \
-  docker.elastic.co/mcp/elasticsearch
+**elastic-mcp-server** (original, REST + broken MCP):
+- `POST /search_products` — REST endpoint, fully working
+- `POST /mcp` — MCP endpoint, broken due to double-nesting (`/mcp/mcp`)
+- Not used by MCPToolset; kept for Agent Builder `tools.yaml` demo and REST fallback
+
+**elastic-mcp-server-native** (new, MCP-native):
+- `GET /health` — liveness probe (intercepted by `_HealthMiddleware`)
+- `POST /mcp` — MCP Streamable HTTP endpoint at correct path (FastMCP as root ASGI)
+- Used by `MCPToolset` in `agent_definition.py`
+- Tool auto-discovered: `search_products` with full ELSER v2 RRF hybrid search
+
+```python
+# elastic_mcp_server_native/main.py — key pattern
+mcp = FastMCP("insure-voice-elastic-native")
+
+@mcp.tool()
+def search_products(query, customer_age, is_smoker, income, ...):
+    ...
+
+app = mcp.http_app(stateless_http=True)      # FastMCP IS the ASGI root
+app.add_middleware(_HealthMiddleware)          # /health handled before FastMCP
+# uvicorn runs `app` on port 8080
 ```
-
-**MCP Tools exposed**:
-- `search` — execute Elasticsearch Query DSL (used by Sub-Agent 1)
-- `list_indices` — list available indices
-- `get_mappings` — inspect field structure
-- `esql` — ES|QL query interface (available for advanced queries)
-
-Agent Builder connects to the MCP server endpoint (`http://elastic-mcp:3000/mcp`) and uses the `search` tool as a registered tool in Sub-Agent 1.
 
 ---
 
-## Data Flow Sequence
+## Data Flow Sequence (Production, 2026-05-29)
 
 ```
-Customer: "I'm 35, married, non-smoker, ₹12L income, need life cover for family"
+Customer: "I'm 35, non-smoker, ₹8L income, need term life for my family"
     │
-    ▼ Cloud STT (streaming, ~1.2s)
-Transcript: "I'm 35 married non-smoker 12 lakh income need life cover for family"
+    ▼ [POST /invoke on insure-voice-agent Cloud Run]
     │
-    ▼ Dialogflow CX (provide_profile intent matched)
+    ▼ LlmAgent (Gemini 2.5 Flash Lite, Vertex AI us-central1)
+      Extracts profile from message
     │
-    ▼ Root Agent — Gemini function-call: extract_profile()
-Profile: {age: 35, smoker: false, income: 1200000, coverage_goals: ["life", "family"], sum_need: 10000000}
+    ▼ MCPToolset → elastic-mcp-server-native /mcp
+      MCP initialize → tools/list → tools/call search_products
+      ELSER v2 RRF hybrid query against insurance_products_current
+Candidates: [FutureSec Term, LifeGuard Plus, FamilyProtect 3Cr, ...] (10 results)
     │
-    ▼ Sub-Agent 1 — Elastic MCP search
-Candidates: [SecureLife Term Plus, IndiaProtect 2 Crore, FamilyShield Pro, LifeMax ULIP, ...] (10 results)
+    ▼ FunctionTool(compliance_check) → Cloud Function
+      POST {"candidate_products": [...], "customer_profile": {age, income, smoker, ...}}
+Passed:   [FutureSec Term, LifeGuard Plus, FamilyProtect 3Cr, ...]
+Rejected: [<products failing age/income/smoker rules>]
     │
-    ▼ Sub-Agent 2 — compliance_check Cloud Function
-Passed:   [SecureLife Term Plus, IndiaProtect 2 Crore, FamilyShield Pro]
-Rejected: [LifeMax ULIP] → reason: "ULIP products require minimum 3-year income continuity declaration"
+    ▼ FunctionTool(rank_products) → Cloud Function
+      POST {"passed_products": [...], "customer_profile": {...}}
+Top 3: ranked by suitability_score
     │
-    ▼ Sub-Agent 3 — rank_products Cloud Function + Gemini explanation
-Top 3: SecureLife (0.87), IndiaProtect (0.79), FamilyShield (0.71)
+    ▼ LlmAgent composes voice response (≤ 120 words)
+Response: "Considering your age and income, here are the top 3 term life insurance plans..."
     │
+    ▼ [JSON {"session_id": ..., "response": "..."} returned to caller]
+```
+
+**Confirmed end-to-end latency**: ~7s (within 8s target)
     ▼ Root Agent — compose voice response
 "Based on your profile, here are my top 3 recommendations..."
     │

@@ -38,13 +38,22 @@ Both transports execute the same RRF hybrid query against the `insurance_product
 CustomerProfile (from Root Agent)
         │  {age, income, smoker, coverage_goals, ...}
         ▼
-Root Agent  →  calls elastic_product_search tool (tools.yaml)
+Root Agent  →  calls elastic_product_search tool (tools.yaml)          [REST path]
         │       POST $ELASTIC_MCP_SERVER_URL/search_products
         │       body: {query, customer_age, is_smoker, income, [product_type], [size]}
+        │
+agent_builder/agent_definition.py  (ADK agent — ✅ EXISTS)                [MCP path]
+        │  MCPToolset(StreamableHTTPConnectionParams(url=".../mcp"))
+        │  auto-discovers `search_products` via MCP initialize + tools/list
         ▼
-functions/elastic_mcp_server/main.py  (Cloud Run service — ✅ EXISTS)
+functions/elastic_mcp_server_native/main.py  (Cloud Run — ✅ EXISTS)       [MCP-native]
+        │  FastMCP 3.3.1 mounted as ASGI root; /mcp is true MCP endpoint
+        │  stateless_http=True — Cloud Run request-scoped sessions
+        │  _HealthMiddleware intercepts /health before FastMCP routing
+        │
+functions/elastic_mcp_server/main.py  (Cloud Run service — ✅ EXISTS)      [REST legacy]
         │  └─ Transport 1: POST /search_products (REST, OpenAPI — used by Agent Builder tools.yaml)
-        │  └─ Transport 2: POST /mcp (MCP JSON-RPC — for ADK MCPToolset clients)
+        │  └─ Transport 2: POST /mcp (MCP JSON-RPC — double-nesting bug: actual path /mcp/mcp)
         │
         │  _execute_search()  →  _build_query()  →  Retrievers API + RRF
         │  ┌─ Leg 1: standard retriever
@@ -85,17 +94,26 @@ ingest/
                                              (no inference_id needed; wait_for_cluster() guard)
   index_products.py                ✅ DONE — bulk ingest via alias; no changes needed
 
-functions/elastic_mcp_server/      ✅ DONE — Cloud Run service (Constitution §VI primary integration)
+functions/elastic_mcp_server/      ✅ DONE — Cloud Run service (REST path; backward-compat)
   main.py                          ✅ DONE — _validate, _build_query, _execute_search;
-                                             POST /search_products (REST for Agent Builder);
-                                             POST /mcp (MCP JSON-RPC for MCPToolset)
+                                             POST /search_products (REST for Agent Builder tools.yaml);
+                                             POST /mcp has /mcp/mcp double-nesting bug (known)
   requirements.txt                 ✅ DONE — fastmcp, fastapi, elasticsearch, uvicorn
+  Dockerfile                       ✅ DONE — Cloud Run container image
+
+functions/elastic_mcp_server_native/ ✅ DONE — Cloud Run service (MCP-native path; used by MCPToolset)
+  main.py                          ✅ DONE — FastMCP 3.3.1 as ASGI root; mcp.http_app(stateless_http=True);
+                                             _HealthMiddleware for /health; true /mcp endpoint
+  requirements.txt                 ✅ DONE — fastmcp>=3.3.1, elasticsearch, uvicorn
   Dockerfile                       ✅ DONE — Cloud Run container image
 
 functions/product_search/
   main.py                          ❌ DEPRECATED — logic moved into elastic_mcp_server
 
 agent_builder/
+  agent_definition.py              ✅ DONE — ADK agent; MCPToolset(StreamableHTTPConnectionParams)
+                                             pointing at elastic-mcp-server-native /mcp;
+                                             no FunctionTool(search_products) to avoid duplicate decl
   tools.yaml                       ✅ DONE — elastic_product_search OpenAPI spec (all 3 tools)
                                              URL: $ELASTIC_MCP_SERVER_URL/search_products
   root_agent_prompt.md             ✅ DONE — references Product Search Agent step
@@ -125,7 +143,7 @@ tests/
 
 | # | Original Plan | Actual Code | Resolution |
 |---|---|---|---|
-| D1 | Create `sub_agent1_search_prompt.md` as primary deliverable | `functions/product_search/main.py` is the implementation | Architecture updated; prompt file remains a TODO |
+| D1 | Create `sub_agent1_search_prompt.md` as primary deliverable | `functions/product_search/main.py` is the implementation | Architecture updated; `agent_builder/sub_agent1_search_prompt.md` created ✅ |
 | D2 | `bool.should` hybrid query | Retrievers API + RRF (Decision F2) | Query pattern section fully rewritten |
 | D3 | Only `description` is `semantic_text` | Both `description` AND `key_feature` are `semantic_text` | Design decision corrected |
 | D4 | `elser-v2-endpoint` managed inference, 60s polling loop | Elastic Cloud Serverless — built-in EIS, `wait_for_cluster()` only | Infrastructure section updated |
@@ -134,7 +152,7 @@ tests/
 | D7 | 2 required search params (`query`, `customer_age`) | 4 required: add `is_smoker`, `income` | Request schema updated |
 | D8 | Fallback: relax income first, then age | Income always enforced; `relax_age_filter=true` relaxes only age | Fallback flow corrected |
 | D9 | Return `_score` | Model field is `elser_score` (Python convention) | Field name corrected everywhere |
-| D10 | Create `test_hybrid_search.py` | File doesn't exist; `test_create_index.py` and `test_insurance_products_data.py` do | Renamed to `test_product_search.py` as TODO |
+| D10 | Create `test_hybrid_search.py` | File doesn't exist; `test_create_index.py` and `test_insurance_products_data.py` do | Created as `test_product_search.py` ✅ |
 | D11 | GENERATE 25–30 products | Catalog already complete: 28 products, all 7 types | Marked ✅ DONE |
 | D12 | "Elastic MCP server" as external service | Elastic MCP Server (Cloud Run) IS the search layer; Agent Builder calls `POST $MCP_URL/search_products` directly (tool: `elastic_product_search`); MCP JSON-RPC also at `POST $MCP_URL/mcp` | Architecture corrected |
 | D13 | Open Q: `_score` pass-through via MCP | `elser_score` is injected by `product_search` function, not from MCP middleware | Open question closed |
@@ -159,7 +177,7 @@ tests/
 
 ---
 
-## Sub-Agent 1 System Prompt (`agent_builder/sub_agent1_search_prompt.md`) — ⬜ TODO
+## Sub-Agent 1 System Prompt (`agent_builder/sub_agent1_search_prompt.md`) — ✅ DONE
 
 This file registers Sub-Agent 1's behaviour when Agent Builder delegates the search step. The Root Agent passes a `CustomerProfile` JSON; this sub-agent calls `elastic_product_search` and returns candidates.
 
@@ -265,7 +283,7 @@ This file registers Sub-Agent 1's behaviour when Agent Builder delegates the sea
 
 ---
 
-## `test_product_search.py` Scope — ⬜ TODO
+## `test_product_search.py` Scope — ✅ DONE
 
 | Test | What it asserts |
 |---|---|

@@ -2,12 +2,20 @@
 
 **Feature Directory**: `specs/002-elser-semantic-search/`
 **Created**: 2026-05-26
-**Updated**: 2026-05-28 (aligned with implementation after drift analysis)
-**Status**: Implemented
+**Updated**: 2026-05-29 (production deployment — MCPToolset with elastic-mcp-server-native)
+**Status**: Implemented ✅
 
 ## Overview
 
-Sub-Agent 1 (Product Search) is implemented as the **Elastic MCP Server** (`functions/elastic_mcp_server/main.py`), a Cloud Run service registered in Agent Builder as the `elastic_product_search` tool (via `tools.yaml`). It is the Constitution §VI primary Elastic search integration — Agent Builder calls it directly with no Cloud Function wrapper. It executes an RRF hybrid query against the `insurance_products_current` Elasticsearch alias on Elastic Cloud Serverless. The query fuses **two** ELSER semantic legs (`description` + `key_feature`) with a BM25 leg (`name^2`, `tags`, `sales_pitch`) using the Retrievers API. Hard eligibility pre-filters (age, income, smoker) are applied at query time on both legs. The result is an ordered list of candidate products passed to Sub-Agent 2 (Compliance Guard). This spec also covers index schema design and product ingestion.
+Sub-Agent 1 (Product Search) is implemented as **two parallel Cloud Run services**:
+
+1. **`elastic-mcp-server`** — original REST+MCP service. REST `/search_products` works. MCP `/mcp` has a double-nesting bug (`/mcp/mcp`). Used for Agent Builder `tools.yaml` REST demo.
+
+2. **`elastic-mcp-server-native`** — new MCP-native service. FastMCP 3.3.1 mounted as the root ASGI app on Starlette, so `/mcp` is the true MCP endpoint. Used by `MCPToolset` in `agent_definition.py`.
+
+The agent (`insure-voice-agent`) uses `MCPToolset(StreamableHTTPConnectionParams(url=".../mcp"))` pointing at `elastic-mcp-server-native`. MCPToolset auto-discovers the `search_products` tool via MCP `initialize` + `tools/list` handshake.
+
+Both services execute the same ELSER v2 RRF hybrid query against the `insurance_products_current` alias.
 
 ---
 
@@ -54,6 +62,33 @@ When no products match the hybrid query (e.g., very restrictive age + smoker fil
 1. **Given** a query with very strict filters that yield 0 results, **When** Sub-Agent 1 gets an empty response (`fallback_triggered: false`), **Then** it retries with `relax_age_filter: true` (age bounds removed); the income floor (`min_income ≤ customer income`) is **always enforced** and never relaxed.
 2. **Given** even the relaxed query returns 0 results, **When** reported to the Root Agent, **Then** the root agent informs the customer that no products currently match their profile.
 3. **Given** the fallback relaxation succeeds, **When** results are passed to compliance, **Then** the compliance layer may still reject some products — that is expected and correct.
+
+---
+
+## Architecture Decisions (2026-05-29)
+
+### Decision: Two MCP Service Deployments
+
+**Context**: `MCPToolset` requires FastMCP to be mounted at the ASGI root so its internal `/mcp` route is served at the outer `/mcp` path. The original `elastic-mcp-server` wraps FastMCP inside FastAPI (`app.mount("/mcp", mcp.http_app())`), causing the actual MCP endpoint to be at `/mcp/mcp` — a 404 for `MCPToolset`.
+
+**Decision**: Deploy a parallel service `elastic-mcp-server-native` using FastMCP as the ASGI root with a `BaseHTTPMiddleware` for `/health`. The original service is kept for backward compatibility with `tools.yaml`.
+
+**Implementation**:
+```python
+# elastic_mcp_server_native/main.py
+app = mcp.http_app(stateless_http=True)   # FastMCP IS the root
+app.add_middleware(_HealthMiddleware)       # /health intercepted before FastMCP routing
+```
+
+### Decision: stateless_http=True
+
+Cloud Run terminates connections between requests — no persistent SSE sessions are possible. `stateless_http=True` enables request-scoped sessions. This was moved from `FastMCP()` constructor (removed in fastmcp 3.x) to `mcp.http_app(stateless_http=True)`.
+
+### Decision: MCPToolset replaces FunctionTool for search
+
+The agent previously used `FunctionTool(search_products)` calling the REST endpoint. This was replaced with `MCPToolset(StreamableHTTPConnectionParams(url=f"{ELASTIC_MCP_SERVER_NATIVE_URL}/mcp"))`. MCPToolset auto-discovers the `search_products` tool and calls it via JSON-RPC — demonstrating genuine Elastic MCP integration per hackathon requirements.
+
+**Key lesson**: Do not register both `MCPToolset` (which auto-discovers `search_products`) and `FunctionTool(search_products)` simultaneously. Gemini rejects `400 INVALID_ARGUMENT: Duplicate function declaration found: search_products`.
 
 ---
 
