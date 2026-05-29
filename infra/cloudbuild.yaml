@@ -2,20 +2,33 @@
 #
 # Deployment order:
 #   1. Build + push Elastic MCP Server Docker image
-#   2. Deploy Elastic MCP Server to Cloud Run (captures service URL)
-#   3. Copy shared/ into compliance_check, deploy compliance_check CF
-#   4. Copy shared/ into rank_products, deploy rank_products CF
+#   2. Deploy Elastic MCP Server to Cloud Run → captures URL to /workspace/mcp_url.txt
+#   3. Copy shared/ + deploy compliance_check Cloud Function
+#   4. Copy shared/ + deploy rank_products Cloud Function
+#   5. Build + push InsureVoice ADK Agent Runner Docker image
+#   6. Deploy ADK Agent Runner to Cloud Run
+#       → ELASTIC_MCP_SERVER_URL injected from /workspace/mcp_url.txt
+#       → COMPLIANCE_CHECK_URL / RANK_PRODUCTS_URL computed from $PROJECT_ID + region
+#       → Gemini via Vertex AI ADC (no API key secret needed)
+#   7. Print deployment summary (all service URLs)
 #
-# NOTE: product_search Cloud Function is REMOVED.
-#       Agent Builder calls the Elastic MCP Server's REST endpoint directly:
-#         POST $ELASTIC_MCP_SERVER_URL/search_products
-#       The MCP server also exposes POST $ELASTIC_MCP_SERVER_URL/mcp for MCPToolset clients.
+# Required substitutions (pass via --substitutions or trigger config):
+#   _ES_URL             — Elastic Cloud Serverless endpoint (https://...)
+#
+# Required Secret Manager secrets:
+#   ES_API_KEY          — Elastic Cloud API key (read by elastic-mcp-server)
+#
+# Required IAM on Cloud Build SA:
+#   roles/run.admin, roles/cloudfunctions.developer, roles/iam.serviceAccountUser,
+#   roles/secretmanager.secretAccessor, roles/aiplatform.user
+
 steps:
 
   # ---------------------------------------------------------------------------
   # Step 1: Build Elastic MCP Server Docker image
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/cloud-builders/docker'
+    id: build-mcp-image
     args:
       - build
       - -t
@@ -23,20 +36,24 @@ steps:
       - functions/elastic_mcp_server
 
   # ---------------------------------------------------------------------------
-  # Step 2a: Push image to Container Registry
+  # Step 2a: Push Elastic MCP Server image to Container Registry
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/cloud-builders/docker'
+    id: push-mcp-image
+    waitFor: [build-mcp-image]
     args:
       - push
       - gcr.io/$PROJECT_ID/elastic-mcp-server
 
   # ---------------------------------------------------------------------------
   # Step 2b: Deploy Elastic MCP Server to Cloud Run.
-  #          ES_API_KEY is read from Secret Manager; ES_URL is a substitution.
-  #          The service URL is written to /workspace/mcp_url.txt for Agent Builder
-  #          console tool registration (set PRODUCT_SEARCH_URL = $MCP_URL/search_products).
+  #   - ES_API_KEY read from Secret Manager (never in build logs)
+  #   - Captures the Cloud Run URL → /workspace/mcp_url.txt
+  #   - This URL is consumed by Step 6 (ADK agent runner env var)
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-mcp-server
+    waitFor: [push-mcp-image]
     entrypoint: bash
     args:
       - -c
@@ -48,179 +65,174 @@ steps:
           --allow-unauthenticated \
           --port=8080 \
           --set-env-vars=ES_URL=${_ES_URL} \
-          --set-secrets=ES_API_KEY=${_ES_API_KEY_SECRET}:latest
-        MCP_URL=$(gcloud run services describe elastic-mcp-server \
+          --set-secrets=ES_API_KEY=ES_API_KEY:latest
+
+        MCP_URL=$$(gcloud run services describe elastic-mcp-server \
           --region=${_REGION} --format='value(status.url)')
-        echo "Elastic MCP Server URL: $MCP_URL"
-        echo "Agent Builder tool URL: $MCP_URL/search_products"
-        echo -n "$MCP_URL" > /workspace/mcp_url.txt
+        echo "Elastic MCP Server: $$MCP_URL"
+        echo "  MCP endpoint:  $$MCP_URL/mcp"
+        echo "  REST endpoint: $$MCP_URL/search_products"
+        echo -n "$$MCP_URL" > /workspace/mcp_url.txt
 
   # ---------------------------------------------------------------------------
-  # Step 3: Copy shared/ module into compliance_check package before deploy
+  # Step 3a: Copy shared/ module into compliance_check package before deploy
   # ---------------------------------------------------------------------------
   - name: 'ubuntu'
+    id: copy-shared-compliance
     entrypoint: bash
     args:
       - -c
       - cp -r shared/ functions/compliance_check/shared/
 
-  # Step 4: Deploy compliance_check Cloud Function
+  # ---------------------------------------------------------------------------
+  # Step 3b: Deploy compliance_check Cloud Function
+  # ---------------------------------------------------------------------------
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+    id: deploy-compliance-check
+    waitFor: [copy-shared-compliance]
+    entrypoint: bash
     args:
-      - functions
-      - deploy
-      - compliance_check
-      - --runtime=python311
-      - --trigger-http
-      - --allow-unauthenticated
-      - --source=functions/compliance_check
-      - --entry-point=compliance_check
-      - --region=${_REGION}
+      - -c
+      - |
+        gcloud functions deploy compliance_check \
+          --runtime=python311 \
+          --trigger-http \
+          --source=functions/compliance_check \
+          --entry-point=compliance_check \
+          --region=${_REGION} \
+          --gen2
+        # Grant public invoker access on the underlying Cloud Run service
+        gcloud run services add-iam-policy-binding compliance-check \
+          --region=${_REGION} \
+          --member=allUsers \
+          --role=roles/run.invoker || true
 
   # ---------------------------------------------------------------------------
-  # Step 5: Copy shared/ module into rank_products package before deploy
+  # Step 4a: Copy shared/ module into rank_products package before deploy
   # ---------------------------------------------------------------------------
   - name: 'ubuntu'
+    id: copy-shared-rank
     entrypoint: bash
     args:
       - -c
       - cp -r shared/ functions/rank_products/shared/
 
-  # Step 6: Deploy rank_products Cloud Function
+  # ---------------------------------------------------------------------------
+  # Step 4b: Deploy rank_products Cloud Function
+  # ---------------------------------------------------------------------------
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+    id: deploy-rank-products
+    waitFor: [copy-shared-rank]
+    entrypoint: bash
     args:
-      - functions
-      - deploy
-      - rank_products
-      - --runtime=python311
-      - --trigger-http
-      - --allow-unauthenticated
-      - --source=functions/rank_products
-      - --entry-point=rank_products
-      - --region=${_REGION}
-
-substitutions:
-  _REGION: us-central1
-  _ES_URL: ''                  # Override: --substitutions=_ES_URL=https://...
-  _ES_API_KEY_SECRET: ES_API_KEY  # GCP Secret Manager secret name
-
-options:
-  logging: CLOUD_LOGGING_ONLY
+      - -c
+      - |
+        gcloud functions deploy rank_products \
+          --runtime=python311 \
+          --trigger-http \
+          --source=functions/rank_products \
+          --entry-point=rank_products \
+          --region=${_REGION} \
+          --gen2
+        # Grant public invoker access on the underlying Cloud Run service
+        gcloud run services add-iam-policy-binding rank-products \
+          --region=${_REGION} \
+          --member=allUsers \
+          --role=roles/run.invoker || true
 
   # ---------------------------------------------------------------------------
-  # Step 1: Build Elastic MCP server Docker image
+  # Step 5a: Build ADK Agent Runner Docker image
+  # Build context: agent_builder/ directory
+  # Image contains: main.py, agent_definition.py, root_agent_prompt.md, requirements.txt
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/cloud-builders/docker'
+    id: build-agent-image
     args:
       - build
       - -t
-      - gcr.io/$PROJECT_ID/elastic-mcp-server
-      - functions/elastic_mcp_server
+      - gcr.io/$PROJECT_ID/insure-voice-agent
+      - agent_builder
 
   # ---------------------------------------------------------------------------
-  # Step 2a: Push image to Container Registry
+  # Step 5b: Push ADK Agent Runner image to Container Registry
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/cloud-builders/docker'
+    id: push-agent-image
+    waitFor: [build-agent-image]
     args:
       - push
-      - gcr.io/$PROJECT_ID/elastic-mcp-server
+      - gcr.io/$PROJECT_ID/insure-voice-agent
 
   # ---------------------------------------------------------------------------
-  # Step 2b: Deploy Elastic MCP server to Cloud Run and capture its URL.
-  #          ES_API_KEY is read from Secret Manager; ES_URL is a substitution.
-  #          The URL is written to /workspace/mcp_url.txt for use in Step 5.
+  # Step 6: Deploy ADK Agent Runner to Cloud Run.
+  #
+  #   ELASTIC_MCP_SERVER_URL — read from /workspace/mcp_url.txt (Step 2b output)
+  #   COMPLIANCE_CHECK_URL   — computed from $PROJECT_ID + region (deterministic CF URL)
+  #   RANK_PRODUCTS_URL      — same pattern
+  #
+  #   Gemini 2.0 Flash accessed via Vertex AI ADC — no API key secret required.
+  #   The agent URL is written to /workspace/agent_url.txt for the summary step.
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-agent-runner
+    waitFor: [push-agent-image, deploy-mcp-server, deploy-compliance-check, deploy-rank-products]
     entrypoint: bash
     args:
       - -c
       - |
-        gcloud run deploy elastic-mcp-server \
-          --image=gcr.io/$PROJECT_ID/elastic-mcp-server \
+        MCP_URL=$$(cat /workspace/mcp_url.txt)
+        COMPLIANCE_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/compliance_check"
+        RANK_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/rank_products"
+
+        gcloud run deploy insure-voice-agent \
+          --image=gcr.io/$PROJECT_ID/insure-voice-agent \
           --platform=managed \
           --region=${_REGION} \
           --allow-unauthenticated \
           --port=8080 \
-          --set-env-vars=ES_URL=${_ES_URL} \
-          --set-secrets=ES_API_KEY=${_ES_API_KEY_SECRET}:latest
-        MCP_URL=$(gcloud run services describe elastic-mcp-server \
+          --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
+
+        AGENT_URL=$$(gcloud run services describe insure-voice-agent \
           --region=${_REGION} --format='value(status.url)')
-        echo -n "$MCP_URL" > /workspace/mcp_url.txt
-        echo "Elastic MCP server deployed at: $MCP_URL"
+        echo "InsureVoice Agent Runner: $$AGENT_URL"
+        echo "  Invoke: $$AGENT_URL/invoke"
+        echo -n "$$AGENT_URL" > /workspace/agent_url.txt
 
   # ---------------------------------------------------------------------------
-  # Step 3: Copy shared/ module into compliance_check package before deploy
+  # Step 7: Print deployment summary — all service URLs for reference
   # ---------------------------------------------------------------------------
   - name: 'ubuntu'
-    entrypoint: bash
-    args:
-      - -c
-      - cp -r shared/ functions/compliance_check/shared/
-
-  # Step 4: Deploy compliance_check Cloud Function
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args:
-      - functions
-      - deploy
-      - compliance_check
-      - --runtime=python311
-      - --trigger-http
-      - --allow-unauthenticated
-      - --source=functions/compliance_check
-      - --entry-point=compliance_check
-      - --region=${_REGION}
-
-  # ---------------------------------------------------------------------------
-  # Step 5: Copy shared/ module into rank_products package before deploy
-  # ---------------------------------------------------------------------------
-  - name: 'ubuntu'
-    entrypoint: bash
-    args:
-      - -c
-      - cp -r shared/ functions/rank_products/shared/
-
-  # Step 6: Deploy rank_products Cloud Function
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args:
-      - functions
-      - deploy
-      - rank_products
-      - --runtime=python311
-      - --trigger-http
-      - --allow-unauthenticated
-      - --source=functions/rank_products
-      - --entry-point=rank_products
-      - --region=${_REGION}
-
-  # ---------------------------------------------------------------------------
-  # Step 7: Deploy product_search Cloud Function.
-  #         Reads ELASTIC_MCP_URL from /workspace/mcp_url.txt (written in Step 2b).
-  #         No direct Elasticsearch credentials needed — the MCP server holds those.
-  # ---------------------------------------------------------------------------
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deployment-summary
+    waitFor: [deploy-agent-runner]
     entrypoint: bash
     args:
       - -c
       - |
-        MCP_URL=$(cat /workspace/mcp_url.txt)
-        gcloud functions deploy product_search \
-          --runtime=python311 \
-          --trigger-http \
-          --allow-unauthenticated \
-          --source=functions/product_search \
-          --entry-point=product_search \
-          --region=${_REGION} \
-          --set-env-vars=ELASTIC_MCP_URL=$MCP_URL
+        MCP_URL=$$(cat /workspace/mcp_url.txt)
+        AGENT_URL=$$(cat /workspace/agent_url.txt)
+        echo "============================================================"
+        echo "  InsureVoice Deployment Summary"
+        echo "============================================================"
+        echo "  elastic-mcp-server (Cloud Run)"
+        echo "    MCP endpoint:  $$MCP_URL/mcp"
+        echo "    REST endpoint: $$MCP_URL/search_products"
+        echo ""
+        echo "  compliance_check (Cloud Function)"
+        echo "    https://${_REGION}-$PROJECT_ID.cloudfunctions.net/compliance_check"
+        echo ""
+        echo "  rank_products (Cloud Function)"
+        echo "    https://${_REGION}-$PROJECT_ID.cloudfunctions.net/rank_products"
+        echo ""
+        echo "  insure-voice-agent (Cloud Run — ADK agent runner)"
+        echo "    Health: $$AGENT_URL/health"
+        echo "    Invoke: $$AGENT_URL/invoke"
+        echo ""
+        echo "  Next: wire $$AGENT_URL/invoke into Dialogflow CX webhook"
+        echo "============================================================"
 
 substitutions:
   _REGION: us-central1
-  _ES_URL: ''                  # Override: --substitutions=_ES_URL=https://...
-  _ES_API_KEY_SECRET: ES_API_KEY  # GCP Secret Manager secret name
+  _ES_URL: ''    # Override: --substitutions=_ES_URL=https://...
 
 options:
   logging: CLOUD_LOGGING_ONLY
-

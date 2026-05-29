@@ -1,0 +1,39 @@
+# gcloudignore — excludes files from Cloud Build source upload
+# See: https://cloud.google.com/sdk/gcloud/reference/topic/gcloudignore
+
+.gcloudignore
+.git
+.gitignore
+
+# Python virtual environments
+voice-insure/
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Local dev artifacts
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Test outputs
+.coverage
+htmlcov/
+
+# Local env files (secrets never in build)
+.env
+.env.local

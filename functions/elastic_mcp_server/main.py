@@ -211,7 +211,8 @@ def _execute_search(data: Optional[dict]) -> tuple[dict, int]:
 # ---------------------------------------------------------------------------
 
 # stateless_http=True: each request is independent — no session handshake required.
-mcp = FastMCP("insure-voice-elastic", stateless_http=True)
+# NOTE: fastmcp>=3.x moved stateless_http from constructor to http_app()/run_http_async().
+mcp = FastMCP("insure-voice-elastic")
 
 
 @mcp.tool()
@@ -265,7 +266,7 @@ def search_products(
 app = FastAPI(title="InsureVoice Elastic MCP Server", version="1.0")
 
 # Mount the MCP transport at /mcp (JSON-RPC endpoint for MCPToolset clients)
-app.mount("/mcp", mcp.http_app())
+app.mount("/mcp", mcp.http_app(stateless_http=True))
 
 
 @app.post("/search_products")
