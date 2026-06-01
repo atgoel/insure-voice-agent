@@ -175,8 +175,43 @@ async def invoke(body: dict) -> JSONResponse:
         "final_rankings": _tool_results.get("rank_products", {}).get("top_3", []),
     })
 
+    # Surface tool outputs to the FE so the recommendations panel can render cards.
+    # rank_products.top_3 contains only {product_id, rank, ...}; join with
+    # search_products.candidates (full product dicts with name/description/elser_score)
+    # so the FE has everything it needs in one shot.
+    _search_candidates = _tool_results.get("search_products", {}).get("candidates", [])
+    _id_to_product = {
+        (c.get("product_id") or c.get("id")): c for c in _search_candidates
+    }
+    _top_3_raw = _tool_results.get("compliance_check", {}).get("passed", []) \
+        or _tool_results.get("rank_products", {}).get("top_3", [])
+    top3_enriched = []
+    for idx, item in enumerate(_top_3_raw):
+        pid = item.get("product_id") or item.get("id")
+        full = _id_to_product.get(pid, {})
+        # Merge: full product fields + rank-specific fields (suitability_score, etc.)
+        merged = {**full, **item, "rank": idx + 1}
+        if merged:
+            top3_enriched.append(merged)
+
+    rejected_with_reason = []
+    for r in _tool_results.get("compliance_check", {}).get("rejected", []):
+        # Compliance returns {product_id, product_name, reasons:[...]}; FE wants
+        # {name, reject_reason}. Convert here so FE shape stays simple.
+        reasons = r.get("reasons", []) or []
+        rejected_with_reason.append({
+            "name": r.get("product_name") or r.get("name", "Unknown"),
+            "product_id": r.get("product_id"),
+            "reject_reason": "; ".join(reasons) if reasons else "Not eligible",
+        })
+
     return JSONResponse(
-        content={"session_id": session_id, "response": response_text},
+        content={
+            "session_id": session_id,
+            "response": response_text,
+            "top3": top3_enriched,
+            "rejected": rejected_with_reason,
+        },
         status_code=200,
     )
 
