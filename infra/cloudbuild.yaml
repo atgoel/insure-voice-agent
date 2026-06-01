@@ -195,12 +195,28 @@ steps:
           --role=roles/run.invoker || true
 
   # ---------------------------------------------------------------------------
+  # Step 4c: Copy frontend/ folder into agent_builder/ so Docker build context
+  # includes the static UI files. Mirrors the shared/ copy pattern (Step 3a/4a).
+  # The agent service then serves index.html + app.js + simulation.js + style.css
+  # at root, so the demo URL is single-origin (no CORS) and the FE+agent ship
+  # together as one Cloud Run service.
+  # ---------------------------------------------------------------------------
+  - name: 'ubuntu'
+    id: copy-frontend-agent
+    entrypoint: bash
+    args:
+      - -c
+      - cp -r frontend/ agent_builder/frontend/
+
+  # ---------------------------------------------------------------------------
   # Step 5a: Build ADK Agent Runner Docker image
   # Build context: agent_builder/ directory
-  # Image contains: main.py, agent_definition.py, root_agent_prompt.md, requirements.txt
+  # Image contains: main.py, agent_definition.py, root_agent_prompt.md,
+  # requirements.txt, and frontend/ (copied in by Step 4c).
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/cloud-builders/docker'
     id: build-agent-image
+    waitFor: [copy-frontend-agent]
     args:
       - build
       - -t
@@ -246,6 +262,7 @@ steps:
           --allow-unauthenticated \
           --port=8080 \
           --min-instances=1 \
+          --max-instances=1 \
           --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,ELASTIC_MCP_SERVER_NATIVE_URL=$$MCP_NATIVE_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
 
         AGENT_URL=$$(gcloud run services describe insure-voice-agent \

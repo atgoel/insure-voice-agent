@@ -181,6 +181,17 @@ async def invoke(body: dict) -> JSONResponse:
     )
 
 
+# ---------------------------------------------------------------------------
+# Static frontend hosting (mounted LAST so /invoke and /health win route precedence)
+# Bundled into the image by Cloud Build step copy-frontend-agent + Dockerfile COPY.
+# Guarded so local dev without the frontend/ subdir keeps working.
+# ---------------------------------------------------------------------------
+from fastapi.staticfiles import StaticFiles
+_frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
+if os.path.isdir(_frontend_dir):
+    app.mount("/", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
+
+
 if __name__ == "__main__":
     uvicorn.run(
         app,

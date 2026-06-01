@@ -18,6 +18,9 @@ COPY agent_definition.py .
 COPY root_agent_prompt.md .
 COPY main.py .
 
+# Bundle frontend (copied in by Cloud Build step copy-frontend-agent before this image builds)
+COPY frontend ./frontend
+
 EXPOSE 8080
 
 CMD ["python", "main.py"]
