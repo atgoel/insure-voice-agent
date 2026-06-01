@@ -215,7 +215,7 @@ root_agent = LlmAgent(
         # ---------------------------------------------------------------
         AgentTool(
             agent=LlmAgent(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 name="recommend_and_explain",
                 description=(
                     "Generates a concise voice-ready recommendation explanation "
