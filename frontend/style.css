@@ -692,13 +692,11 @@ input:checked + .slider:before {
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     transition: all 0.4s ease;
-    display: flex;            /* NEW — make icon participate in flex centering */
-    align-items: center;
-    justify-content: center;
-    width: 100%;              /* NEW — fill the core so flex centering works */
-    height: 100%;
-    text-align: center;       /* NEW — fallback */
-    line-height: 1;           /* NEW — kill FA's asymmetric line-height */
+    /* Let .voice-orb-core's flex centering position the icon naturally.
+       Prior passes added width/height/display:flex which fought the parent's
+       centering and caused horizontal drift. Stripped back to natural sizing. */
+    line-height: 1;           /* prevents FA's asymmetric vertical metrics */
+    display: inline-block;    /* explicit inline-block; do not stretch */
 }
 
 /* Pulsing rings around orb based on speech volume levels */
@@ -710,9 +708,10 @@ input:checked + .slider:before {
     text-transform: uppercase;
     color: var(--secondary);
     text-shadow: 0 0 10px var(--secondary-glow);
-    position: relative;          /* NEW — enables z-index */
-    z-index: 6;                  /* NEW — above #orb-canvas (0) and .voice-orb-core (5) */
-    margin-top: 4px;             /* NEW — small breathing room from canvas edge */
+    position: relative;          /* enables z-index */
+    z-index: 6;                  /* above #orb-canvas (0) and .voice-orb-core (5) */
+    margin-top: 32px;            /* push label below canvas overflow zone with breathing room */
+    margin-bottom: 12px;         /* keep clear distance from sibling transcript container */
 }
 
 /* Live subtitles transcript scrolling box */
@@ -1099,6 +1098,13 @@ input:checked + .slider:before {
     }
     .center-orb-icon {
         font-size: 1.6rem;
+    }
+    /* Recompute canvas offset for the smaller container.
+       Canvas is fixed at 220x220. Container shrinks to 120x120 here.
+       To keep canvas centered: offset = (220 - 120) / 2 = 50px on every side. */
+    #orb-canvas {
+        top: -50px;
+        left: -50px;
     }
     .voice-orb-outer {
         margin: 4px 0;
