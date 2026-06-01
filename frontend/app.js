@@ -453,19 +453,39 @@ window.updateVoiceState = function(state) {
 // 5. Dynamic UI Updates (Transcript & Cards Slider)
 // ----------------------------------------------------
 
+// Convert basic Markdown emitted by Gemini ("* **Age:** 28") into clean HTML for
+// transcript bubbles. Agent prompt asks for plain prose but Gemini occasionally
+// formats anyway; render it gracefully instead of leaking raw asterisks.
+const renderAgentMarkdown = (raw) => {
+    if (!raw) return '';
+    let s = String(raw);
+    // Bold: **text** → <strong>text</strong> (also __text__)
+    s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_\n]+?)__/g, '<strong>$1</strong>');
+    // Italic: *text* (not list bullets) → <em>text</em>
+    s = s.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
+    // List items: lines starting with "* " or "- " → "• "
+    s = s.replace(/^[\s]*[*-]\s+/gm, '• ');
+    // Strip leading "# " heading markers (rare, but happens)
+    s = s.replace(/^#+\s+/gm, '');
+    // Convert remaining newlines to <br> so list items wrap nicely
+    s = s.replace(/\n/g, '<br>');
+    return s;
+};
+
 window.addTranscriptBubble = function(sender, text) {
     const isUser = (sender === 'USER');
     const bubble = document.createElement('div');
     bubble.className = `bubble bubble-${isUser ? 'user' : 'agent'} animate-bubble`;
-    
+
     if (isUser) {
         bubble.textContent = text;
     } else {
-        bubble.innerHTML = text; // Enable rendering glassmorphic HTML tables
+        bubble.innerHTML = renderAgentMarkdown(text); // Enable HTML tables + clean Markdown
     }
-    
+
     transcriptScroller.appendChild(bubble);
-    
+
     // Smooth auto-scroll to bottom of transcripts container
     const container = document.getElementById('transcript-scroller').parentElement;
     container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
@@ -508,23 +528,35 @@ window.displayRecommendedProducts = function(passed, rejected = []) {
     }
 
     // A. Output Passed Products First (Glowing Green Match Badges)
-    passed.forEach(prod => {
+    // Replace raw ELSER score (sparse retrieval values land in 0.01-0.05 range and
+    // read as broken on a UI) with ranking-position badges based on ELSER ordering.
+    const rankLabels = ['Top Match', 'Strong Match', 'Recommended Match'];
+    const sortedByScore = [...passed]
+        .map((p, idx) => ({ p, idx, score: p.elser_score || 0 }))
+        .sort((a, b) => b.score - a.score);
+    const idxToLabel = {};
+    sortedByScore.forEach((entry, rank) => {
+        idxToLabel[entry.idx] = rankLabels[rank] || 'Match';
+    });
+
+    passed.forEach((prod, i) => {
         const card = document.createElement('div');
         card.className = "product-card";
-        
+        const matchLabel = idxToLabel[i] || 'Match';
+
         card.innerHTML = `
             <div class="card-header-row">
                 <span class="card-title">${prod.name}</span>
                 <span class="card-type-badge">${formatType(prod)}</span>
             </div>
-            <div class="card-match-pct" title="ELSER semantic similarity (sparse retrieval RRF score)"><i class="fa-solid fa-fire-flame-curved"></i> ${((prod.elser_score || 0) * 100).toFixed(1)}% ELSER Match</div>
+            <div class="card-match-pct" title="Ranked by ELSER semantic similarity"><i class="fa-solid fa-fire-flame-curved"></i> ${matchLabel}</div>
             <p class="card-desc">${prod.description || prod.key_feature || ''}</p>
             <div class="card-meta-row">
                 <span>Coverage: <span class="card-cover">${formatCoverage(prod)}</span></span>
                 <span>Premium: <span class="card-price">${formatPremium(prod)}</span></span>
             </div>
         `;
-        
+
         sliderContainer.appendChild(card);
     });
 
@@ -538,7 +570,7 @@ window.displayRecommendedProducts = function(passed, rejected = []) {
                 <span class="card-title">${prod.name}</span>
                 <span class="card-type-badge">${formatType(prod)}</span>
             </div>
-            <div class="card-match-pct"><i class="fa-solid fa-ban"></i> Blocked (${((prod.elser_score || 0) * 100).toFixed(1)}%)</div>
+            <div class="card-match-pct"><i class="fa-solid fa-ban"></i> Not Eligible</div>
             <div class="card-rejected-banner">
                 <i class="fa-solid fa-triangle-exclamation"></i> ${prod.reject_reason}
             </div>
