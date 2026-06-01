@@ -179,41 +179,50 @@ async def invoke(body: dict) -> JSONResponse:
     # rank_products.top_3 contains only {product_id, rank, ...}; join with
     # search_products.candidates (full product dicts with name/description/elser_score)
     # so the FE has everything it needs in one shot.
-    _search_candidates = _tool_results.get("search_products", {}).get("candidates", [])
-    _id_to_product = {
-        (c.get("product_id") or c.get("id")): c for c in _search_candidates
-    }
-    _top_3_raw = _tool_results.get("compliance_check", {}).get("passed", []) \
-        or _tool_results.get("rank_products", {}).get("top_3", [])
-    top3_enriched = []
-    for idx, item in enumerate(_top_3_raw):
-        pid = item.get("product_id") or item.get("id")
-        full = _id_to_product.get(pid, {})
-        # Merge: full product fields + rank-specific fields (suitability_score, etc.)
-        merged = {**full, **item, "rank": idx + 1}
-        if merged:
-            top3_enriched.append(merged)
-
-    rejected_with_reason = []
-    for r in _tool_results.get("compliance_check", {}).get("rejected", []):
-        # Compliance returns {product_id, product_name, reasons:[...]}; FE wants
-        # {name, reject_reason}. Convert here so FE shape stays simple.
-        reasons = r.get("reasons", []) or []
-        rejected_with_reason.append({
-            "name": r.get("product_name") or r.get("name", "Unknown"),
-            "product_id": r.get("product_id"),
-            "reject_reason": "; ".join(reasons) if reasons else "Not eligible",
-        })
-
-    return JSONResponse(
-        content={
-            "session_id": session_id,
-            "response": response_text,
-            "top3": top3_enriched,
-            "rejected": rejected_with_reason,
-        },
-        status_code=200,
+    #
+    # IMPORTANT — follow-up turns ("tell me more about the third option") deliberately
+    # do NOT re-run search/compliance/rank (per root_agent_prompt.md §"Follow-up
+    # questions"). On those turns, _tool_results lacks search_products/compliance_check
+    # entries entirely. Returning empty top3=[] would clear the FE's existing cards
+    # from the prior recommendation turn. Detect that case and OMIT top3/rejected
+    # from the response so the FE preserves what it already has.
+    _has_pipeline_call = (
+        "search_products" in _tool_results
+        or "compliance_check" in _tool_results
+        or "rank_products" in _tool_results
     )
+
+    response_payload: dict = {"session_id": session_id, "response": response_text}
+
+    if _has_pipeline_call:
+        _search_candidates = _tool_results.get("search_products", {}).get("candidates", [])
+        _id_to_product = {
+            (c.get("product_id") or c.get("id")): c for c in _search_candidates
+        }
+        _top_3_raw = _tool_results.get("compliance_check", {}).get("passed", []) \
+            or _tool_results.get("rank_products", {}).get("top_3", [])
+        top3_enriched = []
+        for idx, item in enumerate(_top_3_raw):
+            pid = item.get("product_id") or item.get("id")
+            full = _id_to_product.get(pid, {})
+            # Merge: full product fields + rank-specific fields (suitability_score, etc.)
+            merged = {**full, **item, "rank": idx + 1}
+            if merged:
+                top3_enriched.append(merged)
+
+        rejected_with_reason = []
+        for r in _tool_results.get("compliance_check", {}).get("rejected", []):
+            reasons = r.get("reasons", []) or []
+            rejected_with_reason.append({
+                "name": r.get("product_name") or r.get("name", "Unknown"),
+                "product_id": r.get("product_id"),
+                "reject_reason": "; ".join(reasons) if reasons else "Not eligible",
+            })
+
+        response_payload["top3"] = top3_enriched
+        response_payload["rejected"] = rejected_with_reason
+
+    return JSONResponse(content=response_payload, status_code=200)
 
 
 # ---------------------------------------------------------------------------

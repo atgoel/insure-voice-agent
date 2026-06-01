@@ -517,7 +517,7 @@ window.displayRecommendedProducts = function(passed, rejected = []) {
                 <span class="card-title">${prod.name}</span>
                 <span class="card-type-badge">${formatType(prod)}</span>
             </div>
-            <div class="card-match-pct"><i class="fa-solid fa-fire-flame-curved"></i> ${prod.elser_score || 0}% ELSER Match</div>
+            <div class="card-match-pct" title="ELSER semantic similarity (sparse retrieval RRF score)"><i class="fa-solid fa-fire-flame-curved"></i> ${((prod.elser_score || 0) * 100).toFixed(1)}% ELSER Match</div>
             <p class="card-desc">${prod.description || prod.key_feature || ''}</p>
             <div class="card-meta-row">
                 <span>Coverage: <span class="card-cover">${formatCoverage(prod)}</span></span>
@@ -538,7 +538,7 @@ window.displayRecommendedProducts = function(passed, rejected = []) {
                 <span class="card-title">${prod.name}</span>
                 <span class="card-type-badge">${formatType(prod)}</span>
             </div>
-            <div class="card-match-pct"><i class="fa-solid fa-ban"></i> Blocked (${prod.elser_score || 0}%)</div>
+            <div class="card-match-pct"><i class="fa-solid fa-ban"></i> Blocked (${((prod.elser_score || 0) * 100).toFixed(1)}%)</div>
             <div class="card-rejected-banner">
                 <i class="fa-solid fa-triangle-exclamation"></i> ${prod.reject_reason}
             </div>

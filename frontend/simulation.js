@@ -396,11 +396,16 @@ class VoiceSimulationEngine {
                 this.invokeSessionId = data.session_id;
                 const explanation = data.response || "I'm sorry, I didn't catch that. Could you say it again?";
 
-                // Phase 2 hook: if the agent enriches with top3+rejected, render product cards
-                if (Array.isArray(data.top3) && Array.isArray(data.rejected)) {
-                    window.displayRecommendedProducts(data.top3, data.rejected);
-                } else {
-                    window.displayRecommendedProducts([], []);
+                // Render product cards ONLY when the response actually carries new
+                // recommendation data. Follow-up turns ("tell me more about the third
+                // option") deliberately omit top3/rejected — preserve the existing
+                // cards instead of clearing them. Use property presence, NOT truthiness:
+                // an empty array is a real "no matches found" signal worth honoring;
+                // a missing key means "no new pipeline run, keep current cards."
+                if ('top3' in data || 'rejected' in data) {
+                    const newTop3 = Array.isArray(data.top3) ? data.top3 : [];
+                    const newRejected = Array.isArray(data.rejected) ? data.rejected : [];
+                    window.displayRecommendedProducts(newTop3, newRejected);
                 }
 
                 window.addTranscriptBubble('AGENT', explanation);
