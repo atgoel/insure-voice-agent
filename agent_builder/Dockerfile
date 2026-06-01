@@ -13,9 +13,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy agent source: definition, prompt, entry point
+# Copy agent source: definition, prompts, entry point
 COPY agent_definition.py .
 COPY root_agent_prompt.md .
+COPY sub_agent3_explainer_prompt.md .
 COPY main.py .
 
 # Bundle frontend (copied in by Cloud Build step copy-frontend-agent before this image builds)
