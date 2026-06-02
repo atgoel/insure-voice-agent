@@ -188,15 +188,13 @@ root_agent = LlmAgent(
     ).read(),
     tools=[
         # ---------------------------------------------------------------
-        # Tool 1: Elastic MCP Server NATIVE — ELSER RRF search via MCP protocol
-        # FastMCP mounted at Starlette root → /mcp is the actual MCP endpoint.
-        # MCPToolset auto-discovers 'search_products' via MCP initialize handshake.
+        # Tool 1: Search products — REST call to elastic-mcp-server
+        # NOTE: Switched from MCPToolset (MCP-native /mcp) to plain REST FunctionTool.
+        # MCP-native wraps responses as {content, structuredContent, isError}; the LLM
+        # cannot extract `candidates` from that envelope, so compliance was always
+        # called with empty list. REST returns {candidates: [...]} directly.
         # ---------------------------------------------------------------
-        MCPToolset(
-            connection_params=StreamableHTTPConnectionParams(
-                url=f"{ELASTIC_MCP_SERVER_NATIVE_URL}/mcp",
-            )
-        ),
+        FunctionTool(search_products),
 
         # ---------------------------------------------------------------
         # Tool 2: Compliance check — deterministic rule engine (Cloud Function)

@@ -149,6 +149,12 @@ async def invoke(body: dict) -> JSONResponse:
                     if fr is not None:
                         tool_name = getattr(fr, "name", None)
                         tool_resp = getattr(fr, "response", None)
+                        # Defensive: unwrap MCP-native envelope {content, structuredContent, isError}
+                        # in case any future tool is registered via MCPToolset.
+                        if isinstance(tool_resp, dict) and "structuredContent" in tool_resp:
+                            unwrapped = tool_resp.get("structuredContent")
+                            if isinstance(unwrapped, dict):
+                                tool_resp = unwrapped
                         if tool_name and tool_resp is not None:
                             _tool_results[tool_name] = tool_resp
 
