@@ -32,6 +32,7 @@ from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
 from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StreamableHTTPConnectionParams
+from google.genai import types as genai_types
 
 # ---------------------------------------------------------------------------
 # Environment — Cloud Run / Cloud Function URLs
@@ -223,6 +224,13 @@ root_agent = LlmAgent(
                 instruction=open(
                     os.path.join(os.path.dirname(__file__), "sub_agent3_explainer_prompt.md")
                 ).read(),
+                # Lower temp commits the sub-agent to producing output (was returning empty
+                # text occasionally at default temp=1.0, which surfaced as the FE "didn't
+                # catch that" fallback even when top3 was populated).
+                generate_content_config=genai_types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=400,
+                ),
             )
         ),
     ],

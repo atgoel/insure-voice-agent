@@ -394,7 +394,13 @@ class VoiceSimulationEngine {
             })
             .then(data => {
                 this.invokeSessionId = data.session_id;
-                const explanation = data.response || "I'm sorry, I didn't catch that. Could you say it again?";
+                // Fallback when bot text is empty: if pipeline returned products, point at the cards.
+                // Otherwise the original "didn't catch that" prompt for the user to retry.
+                const hasProducts = Array.isArray(data.top3) && data.top3.length > 0;
+                const explanation = data.response
+                    || (hasProducts
+                        ? "Here are your top matches — please see the recommended products on the right."
+                        : "I'm sorry, I didn't catch that. Could you say it again?");
 
                 // Render product cards ONLY when the response actually carries new
                 // recommendation data. Follow-up turns ("tell me more about the third
