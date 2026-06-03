@@ -13,11 +13,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy agent source: definition, prompts, entry point
+# Copy agent source: definition, prompts, entry point + Day 5/6 modules
 COPY agent_definition.py .
 COPY root_agent_prompt.md .
 COPY sub_agent3_explainer_prompt.md .
 COPY main.py .
+# Day 5 — P.2 conversational intake state machine (8-field validators)
+COPY intake.py .
+# Day 6 — S2'/S3 module-level session-state dicts + S3 follow-up state machine
+COPY shared_state.py .
+COPY followup.py .
 
 # Bundle frontend (copied in by Cloud Build step copy-frontend-agent before this image builds)
 COPY frontend ./frontend
