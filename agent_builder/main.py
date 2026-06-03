@@ -188,6 +188,37 @@ async def invoke(body: dict) -> JSONResponse:
     # complete, build a synthetic complete-profile message and forward to the
     # LlmAgent runner for the SEARCH → COMPLIANCE → RANK → EXPLAIN pipeline.
     # Profile and expecting_field persist across turns in _INTAKE_BY_SESSION.
+
+    # S3 — Reset detection. Runs BEFORE intake so the user can bail out at
+    # any point ("start over" mid-intake or post-recommendation). Clears all
+    # per-session state and restarts intake from name. No LLM call.
+    try:
+        from followup import is_reset_intent, reset_voice_text
+        if is_reset_intent(message):
+            try:
+                _INTAKE_BY_SESSION.pop(session_id, None)
+            except Exception:
+                pass
+            try:
+                from shared_state import PROFILE_BY_SESSION as _PBS, TOP3_BY_SESSION as _TBS
+                _PBS.pop(session_id, None)
+                _TBS.pop(session_id, None)
+            except Exception:
+                pass
+            try:
+                _log.info("S3_RESET session=%s pattern=%r", session_id[:8], message[:80])
+            except Exception:
+                pass
+            return JSONResponse(
+                status_code=200,
+                content={"session_id": session_id, "response": reset_voice_text()},
+            )
+    except Exception:
+        try:
+            _log.exception("S3_RESET_DETECT_FAILED session=%s — falling through", session_id[:8])
+        except Exception:
+            pass
+
     intake_state = _INTAKE_BY_SESSION.setdefault(session_id, {})
     if not intake_state.get("complete"):
         intake_result = handle_intake(intake_state, message.strip())
@@ -204,6 +235,26 @@ async def invoke(body: dict) -> JSONResponse:
         # to the LLM. The LLM now only has to run the pipeline (no extraction).
         intake_state["complete"] = True
         intake_state["profile"] = intake_result["profile"]
+        # S2' — Mirror validated profile into shared_state.PROFILE_BY_SESSION so
+        # search_products wrapper (agent_definition.py) can inject product_type
+        # without depending on the LLM. Module-level dict is the primary channel
+        # because ADK session.state mutations are unreliable in this deployment
+        # (see comment at main.py:46-52). dict() copies to avoid aliasing.
+        try:
+            from shared_state import PROFILE_BY_SESSION as _PBS
+            _PBS[session_id] = dict(intake_result["profile"])
+        except Exception:
+            try:
+                _log.exception("S2_PROFILE_MIRROR_FAILED session=%s", session_id[:8])
+            except Exception:
+                pass
+        # Defense-in-depth — also try ADK session state. If ADK ever fixes
+        # the persistence bug, the wrapper's fallback path picks this up.
+        # If it stays broken, the module dict above is sufficient. No-op on failure.
+        try:
+            existing.state["intake_profile"] = dict(intake_result["profile"])
+        except Exception:
+            pass
         synthetic = build_synthetic_message(intake_result["profile"])
         try:
             _log.info("INTAKE_COMPLETE session=%s synthetic=%s", session_id[:8], synthetic[:200])
@@ -215,7 +266,93 @@ async def invoke(body: dict) -> JSONResponse:
         )
     else:
         # Intake already complete in a prior turn (follow-up / multi-turn after
-        # recommendations) — pass the user's message through to the LLM agent.
+        # recommendations) — first try deterministic follow-up handling, then
+        # fall back to the LLM if we can't resolve the intent.
+
+        # S3 — Deterministic follow-up handling. Detects intent + resolves to
+        # a single top3 product, returns a templated voice summary. Bypasses
+        # the LLM entirely on the happy path. Falls through on:
+        #   - no follow-up intent detected
+        #   - intent detected but no top3 in shared_state
+        #   - intent detected but product not resolvable (fuzzy < 0.6)
+        #   - "compare" intent (parked — needs LLM)
+        try:
+            from followup import (
+                detect_followup_intent,
+                resolve_ordinal_index,
+                match_product_by_name,
+                build_voice_text,
+                no_match_voice_text,
+            )
+            from shared_state import TOP3_BY_SESSION as _TBS
+            _intent = detect_followup_intent(message)
+            _top3 = _TBS.get(session_id) or []
+            if _intent in ("ordinal", "named") and _top3:
+                _matched = None
+                _match_method = None
+                if _intent == "ordinal":
+                    _idx = resolve_ordinal_index(message)
+                    if _idx is not None and 0 <= _idx < len(_top3):
+                        _matched = _top3[_idx]
+                        _match_method = "ordinal"
+                else:  # "named"
+                    _matched, _match_method = match_product_by_name(message, _top3)
+                if _matched is not None:
+                    _voice = build_voice_text(_matched)
+                    try:
+                        _log.info(
+                            "S3_FOLLOWUP_HIT session=%s intent=%s method=%s product=%r index=%s",
+                            session_id[:8], _intent, _match_method,
+                            (_matched.get("name") or "?")[:40],
+                            (_idx if _intent == "ordinal" else "-"),
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        _log.info("S3_VOICE session=%s len=%d", session_id[:8], len(_voice))
+                    except Exception:
+                        pass
+                    # Per main.py:469-479 — DO NOT include top3/rejected in the
+                    # response on follow-up turns; the FE preserves what it has.
+                    return JSONResponse(
+                        status_code=200,
+                        content={"session_id": session_id, "response": _voice},
+                    )
+                else:
+                    # Intent matched but no product resolved — ask which one.
+                    try:
+                        _log.info(
+                            "S3_FOLLOWUP_MISS session=%s reason=no_product_match intent=%s top3_n=%d",
+                            session_id[:8], _intent, len(_top3),
+                        )
+                    except Exception:
+                        pass
+                    return JSONResponse(
+                        status_code=200,
+                        content={"session_id": session_id, "response": no_match_voice_text()},
+                    )
+            elif _intent == "compare":
+                # Parked — fall through to LLM (it can attempt comparison from
+                # whatever it remembers + retrieves). Future S4 may handle this.
+                try:
+                    _log.info("S3_FOLLOWUP_MISS session=%s reason=compare_parked", session_id[:8])
+                except Exception:
+                    pass
+            elif _intent in ("ordinal", "named") and not _top3:
+                # Intent detected but no recommendations exist yet — fall through
+                # to LLM (which will see the intake-complete state and re-run
+                # the pipeline). Common after a reset where intake wasn't redone.
+                try:
+                    _log.info("S3_FOLLOWUP_MISS session=%s reason=no_top3_in_state", session_id[:8])
+                except Exception:
+                    pass
+            # else: no follow-up intent — straight passthrough to LLM
+        except Exception:
+            try:
+                _log.exception("S3_FOLLOWUP_DISPATCH_FAILED session=%s — falling through to LLM", session_id[:8])
+            except Exception:
+                pass
+
         user_content = genai_types.Content(
             role="user",
             parts=[genai_types.Part(text=message.strip())],
@@ -484,6 +621,28 @@ async def invoke(body: dict) -> JSONResponse:
             if merged:
                 # F.2 — Unicode garble fix on outbound product (₹ etc.)
                 top3_enriched.append(_sanitize_product(merged))
+
+        # S3 — Snapshot enriched top3 for follow-up turns. Uses the already-
+        # sanitized list so build_voice_text reads the same fields the FE has.
+        # Deep-copy via dict() per element to avoid aliasing.
+        # CRITICAL: this block sits AT THE SAME INDENT as `rejected_with_reason = []`
+        # below — it must NOT be inside the `for idx, item in enumerate(...)` loop.
+        if top3_enriched:
+            try:
+                from shared_state import TOP3_BY_SESSION as _TBS
+                _TBS[session_id] = [dict(p) for p in top3_enriched]
+                try:
+                    _log.info(
+                        "S3_TOP3_SNAPSHOT session=%s n=%d",
+                        session_id[:8], len(top3_enriched),
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    _log.exception("S3_TOP3_SNAPSHOT_FAILED session=%s", session_id[:8])
+                except Exception:
+                    pass
 
         rejected_with_reason = []
         for r in _tool_results.get("compliance_check", {}).get("rejected", []):

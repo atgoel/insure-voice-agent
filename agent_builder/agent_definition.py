@@ -89,6 +89,76 @@ def search_products(
         "size": size,
         "relax_age_filter": relax_age_filter,
     }
+    # S2' — Mechanical product_type injection from validated intake profile.
+    # flash-lite omits product_type from search_products calls, defeating the
+    # MCP server's term-filter (functions/elastic_mcp_server/main.py:108-109).
+    # PRIMARY channel: shared_state.PROFILE_BY_SESSION (module-level dict).
+    # FALLBACK: tool_context.state (ADK session state) — unreliable but free.
+    # coverage_goals enums are 1:1 with product_type catalog values
+    # (verified against intake.py:142-148 + insurance_products.json).
+    _llm_passed_pt = product_type
+    _intake_goal = None
+    _profile = None
+    _session_id = None
+    try:
+        if tool_context is not None:
+            try:
+                _session_id = tool_context._invocation_context.session.id
+            except Exception:
+                _session_id = None
+            # Primary read: module-level dict
+            if _session_id:
+                try:
+                    from shared_state import PROFILE_BY_SESSION as _PBS
+                    _profile = _PBS.get(_session_id)
+                except Exception:
+                    _profile = None
+            # Fallback: ADK session state (defense-in-depth)
+            if not _profile:
+                try:
+                    _profile = tool_context.state.get("intake_profile") or None
+                except Exception:
+                    _profile = None
+            if _profile:
+                _goals = _profile.get("coverage_goals") or []
+                if isinstance(_goals, list) and _goals:
+                    # MVP: pick first goal. Multi-goal disambiguation owned
+                    # by S3 (C.2 follow-up state machine), not here.
+                    _intake_goal = _goals[0]
+                    # Multi-goal warning — implementer is on notice that
+                    # the user actually requested multiple types and S2' is
+                    # only honoring the first.
+                    if len(_goals) > 1:
+                        try:
+                            import logging as _l
+                            _l.getLogger().warning(
+                                "S2_INJECT_MULTIGOAL session=%s goals=%r picked=%r — multi-goal disambiguation deferred to S3",
+                                (_session_id or "?")[:8], _goals, _intake_goal,
+                            )
+                        except Exception:
+                            pass
+                elif isinstance(_goals, str) and _goals.strip():
+                    _intake_goal = _goals.strip()
+    except Exception:
+        _intake_goal = None
+    if _intake_goal:
+        product_type = _intake_goal  # override LLM-passed value (intake wins)
+        try:
+            import logging as _l
+            _l.getLogger().info(
+                "S2_INJECT session=%s llm_passed=%r intake_goal=%r -> product_type=%r",
+                (_session_id or "?")[:8], _llm_passed_pt, _intake_goal, product_type,
+            )
+        except Exception:
+            pass
+    elif tool_context is not None and _session_id is None:
+        # Couldn't even get a session_id — degrade silently but log once so
+        # the validation gate can detect this regression mode.
+        try:
+            import logging as _l
+            _l.getLogger().warning("S2_INJECT_SESSION_ID_MISS — using LLM-passed product_type=%r", _llm_passed_pt)
+        except Exception:
+            pass
     if product_type is not None:
         payload["product_type"] = product_type
     # Debug — log what the LLM actually constructed for search args
@@ -101,7 +171,10 @@ def search_products(
     except Exception:
         pass
     try:
-        resp = httpx.post(f"{ELASTIC_MCP_SERVER_URL}/search_products", json=payload, timeout=2.5)
+        # Timeout bumped from 2.5s -> 8.0s on Day 6 (S5 finding):
+        # CF cold-start + ELSER inference + RRF query routinely takes 3-5s.
+        # 2.5s caused n_candidates=0 timeouts on first call, breaking the demo arc.
+        resp = httpx.post(f"{ELASTIC_MCP_SERVER_URL}/search_products", json=payload, timeout=8.0)
         resp.raise_for_status()
         result = resp.json()
         # Stability C.5b — stash candidates in session state so compliance_check
