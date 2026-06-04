@@ -17,6 +17,8 @@
     <link rel="stylesheet" href="style.css">
     <!-- Empty content = relative URL (same-origin deploy). Set absolute URL for local-dev cross-origin testing. -->
     <meta name="invoke-url" content="">
+    <!-- Simulation endpoint — empty = same-origin /simulate proxy (agent_builder/main.py POST /simulate) -->
+    <meta name="simulate-url" content="">
 </head>
 <body>
 
@@ -163,9 +165,99 @@
 
     </div>
 
+    <!-- =================================------------- -->
+    <!-- SCREEN 3: PREMIUM SIMULATION PANEL (Story 6)  -->
+    <!-- =================================------------- -->
+    <section id="simulation-screen" class="simulation-panel glass-card" style="display:none;">
+        <div class="sim-panel-header">
+            <h3><i class="fa-solid fa-calculator text-primary"></i> Premium Simulator</h3>
+            <button id="btn-close-sim" class="btn-icon-control" title="Close Simulator">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+
+        <div class="sim-form-grid">
+            <!-- Product selector -->
+            <div class="sim-field-group">
+                <label for="sim-product-select"><i class="fa-solid fa-shield-halved icon-label"></i> Insurance Plan</label>
+                <select id="sim-product-select" class="form-control">
+                    <option value="">— Select a plan from recommendations —</option>
+                </select>
+            </div>
+
+            <!-- Sum Assured slider -->
+            <div class="sim-field-group sim-slider-group">
+                <label for="sim-sum-assured"><i class="fa-solid fa-indian-rupee-sign icon-label"></i> Sum Assured</label>
+                <input type="range" id="sim-sum-assured" class="sim-slider" min="500000" max="50000000" step="500000" value="5000000">
+                <span id="sim-sum-label" class="sim-slider-label">₹50L</span>
+            </div>
+
+            <!-- Premium Frequency -->
+            <div class="sim-field-group">
+                <label for="sim-frequency"><i class="fa-solid fa-calendar-days icon-label"></i> Payment Frequency</label>
+                <select id="sim-frequency" class="form-control">
+                    <option value="monthly" selected>Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                    <option value="semi_annual">Half-Yearly</option>
+                    <option value="annual">Annual</option>
+                </select>
+            </div>
+
+            <!-- Policy Term -->
+            <div class="sim-field-group">
+                <label for="sim-policy-term"><i class="fa-solid fa-clock icon-label"></i> Policy Term (years)</label>
+                <select id="sim-policy-term" class="form-control">
+                    <option value="10">10 years</option>
+                    <option value="15" selected>15 years</option>
+                    <option value="20">20 years</option>
+                    <option value="25">25 years</option>
+                    <option value="30">30 years</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Results card -->
+        <div id="sim-results-card" class="sim-results-card" style="display:none;">
+            <h4 class="sim-results-title"><i class="fa-solid fa-chart-line text-secondary"></i> Simulation Results</h4>
+            <div class="sim-results-grid">
+                <div class="sim-result-item">
+                    <span class="sim-result-label">Period Premium</span>
+                    <span class="sim-result-value" id="sim-res-period">—</span>
+                </div>
+                <div class="sim-result-item">
+                    <span class="sim-result-label">Annual Premium</span>
+                    <span class="sim-result-value" id="sim-res-annual">—</span>
+                </div>
+                <div class="sim-result-item">
+                    <span class="sim-result-label">Total Outflow</span>
+                    <span class="sim-result-value" id="sim-res-total">—</span>
+                </div>
+                <div class="sim-result-item" id="sim-res-maturity-row">
+                    <span class="sim-result-label">Projected Maturity</span>
+                    <span class="sim-result-value emerald" id="sim-res-maturity">—</span>
+                </div>
+                <div class="sim-result-item" id="sim-res-gain-row">
+                    <span class="sim-result-label">Net Gain</span>
+                    <span class="sim-result-value emerald" id="sim-res-gain">—</span>
+                </div>
+            </div>
+            <p class="sim-disclaimer">Figures are illustrative only and subject to underwriting terms.</p>
+        </div>
+
+        <div id="sim-error-msg" class="sim-error" style="display:none;"></div>
+        <div id="sim-loading" class="sim-loading" style="display:none;">
+            <i class="fa-solid fa-spinner fa-spin"></i> Calculating...
+        </div>
+    </section>
+
+    <!-- Floating button to open simulation panel -->
+    <button id="btn-open-sim" class="btn-open-sim" title="Open Premium Simulator" style="display:none;">
+        <i class="fa-solid fa-calculator"></i>
+        <span>Simulate Premium</span>
+    </button>
+
     <!-- Toggleable Technical Debug Terminal (Great for Hackathon Demos) -->
-    <button id="btn-toggle-debug" class="btn-debug-toggle" title="Toggle Developer Debug Console">
-        <i class="fa-solid fa-terminal"></i> Debug Info
+    <button id="btn-toggle-debug" class="btn-debug-toggle" title="Toggle Developer Debug Console">        <i class="fa-solid fa-terminal"></i> Debug Info
     </button>
     
     <div id="debug-drawer" class="debug-terminal">

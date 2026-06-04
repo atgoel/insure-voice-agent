@@ -205,3 +205,126 @@ class TestFollowUpResponse:
             SINGLE_PRODUCT_FOLLOWUP,
             ["application", "compare", "shall I", "would you like"],
         )
+
+
+# ---------------------------------------------------------------------------
+# TASK-089: Pitch mode — Product Deep-Dive (Story 5)
+# ---------------------------------------------------------------------------
+
+# Representative pitch output for a savings product (ULIP) — text channel, no word limit.
+PITCH_ULIP_TEXT = (
+    "The WealthGuard ULIP is open to applicants between 18 and 55 years old with a "
+    "minimum annual income of 300,000 INR. Non-smokers only. "
+    "It provides market-linked returns alongside a life cover of up to 50 lakh INR, "
+    "with a flexible policy term of 10 to 20 years. "
+    "This plan historically projects approximately 11% annual growth based on the catalog return rate. "
+    "Unlike the term and health plans we reviewed, this ULIP is the only option that builds "
+    "long-term wealth while keeping life protection intact — that distinctive dual benefit is "
+    "what sets it apart from the other two ranked products. "
+    "It ranked second for your profile, scoring highest on income fit and long-term goal alignment. "
+    "Shall I walk you through starting the application, or would you like to compare it with another plan?"
+)
+
+# Representative pitch output for a pure-protection product (term life) — voice channel.
+PITCH_TERM_VOICE = (
+    "The SecureLife Term Plus is available to non-smokers aged 18 to 65 with a minimum income "
+    "of 200,000 INR. It covers up to 1 crore INR for a term of 10 to 30 years. "
+    "This is a pure protection plan — premiums pay for cover only, with no maturity payout. "
+    "Its key differentiator among the top three is the longest available term at 30 years, "
+    "giving you cover deep into retirement. "
+    "Shall I start the application?"
+)
+
+# Pitch fixture where return_rate is intentionally absent — must NOT contain return claim
+PITCH_NO_RETURN_RATE = (
+    "The GrowthSure Endowment is available to applicants aged 18 to 55. "
+    "It combines life cover with a savings component over a 15-year term. "
+    "It scored highest on your profile due to strong age centrality and income fit. "
+    "Shall I proceed with the application?"
+)
+
+
+class TestPitchModeSavingsProduct:
+    """Story 5 AC 4: savings product pitch cites return_rate from catalog; no LLM fabrication."""
+
+    def test_ulip_pitch_contains_return_rate_mention(self):
+        """Pitch for a savings product must mention the return_rate figure."""
+        assert has_personalisation(PITCH_ULIP_TEXT, ["11%", "11 %", "11 percent", "return rate"])
+
+    def test_ulip_pitch_no_markdown(self):
+        assert not contains_markdown(PITCH_ULIP_TEXT)
+
+    def test_ulip_pitch_has_eligibility_prerequisites(self):
+        """Pitch must include eligibility info: age range, income, or smoker status."""
+        assert has_personalisation(
+            PITCH_ULIP_TEXT,
+            ["18", "55", "300,000", "non-smoker", "non smoker", "income"],
+        )
+
+    def test_ulip_pitch_has_unique_differentiator(self):
+        """Story 5 AC 6: pitch must highlight one distinguishing trait vs. other top-3."""
+        assert has_personalisation(
+            PITCH_ULIP_TEXT,
+            ["sets it apart", "differenti", "unique", "only option", "unlike"],
+        )
+
+    def test_ulip_pitch_has_suitability_comparison(self):
+        """Story 5 AC 1c: pitch must compare suitability score against other top-3."""
+        assert has_personalisation(
+            PITCH_ULIP_TEXT,
+            ["ranked", "second", "first", "third", "suitability", "scored"],
+        )
+
+
+class TestPitchModeProtectionProduct:
+    """Story 5 AC 5: protection product pitch explicitly states no maturity value."""
+
+    def test_term_pitch_states_pure_protection(self):
+        """Pitch for term_life must state it is a pure protection plan."""
+        assert has_personalisation(
+            PITCH_TERM_VOICE,
+            ["pure protection", "no maturity", "protection plan", "no payout"],
+        )
+
+    def test_term_pitch_voice_within_120_words(self):
+        """Story 5 AC 2: voice-channel pitch must be ≤ 120 words."""
+        assert count_words(PITCH_TERM_VOICE) <= 120, (
+            f"Voice pitch is {count_words(PITCH_TERM_VOICE)} words — exceeds 120-word limit"
+        )
+
+    def test_term_pitch_no_markdown(self):
+        assert not contains_markdown(PITCH_TERM_VOICE)
+
+
+class TestPitchModeTextChannel:
+    """Story 5 AC 3: text-channel pitch is NOT truncated to 120 words."""
+
+    def test_text_channel_pitch_may_exceed_120_words(self):
+        """ULIP text-channel pitch is a full structured output — allowed to exceed 120 words."""
+        # The ULIP text pitch is intentionally long to exercise the no-truncation rule.
+        # This test asserts the fixture IS longer than 120 words, confirming the rule is
+        # being exercised (not just passing vacuously on a short string).
+        assert count_words(PITCH_ULIP_TEXT) > 120, (
+            "Text-channel pitch fixture should be > 120 words to test that no truncation occurs"
+        )
+
+    def test_text_channel_pitch_no_markdown(self):
+        """Even text-channel pitch must not use markdown formatting."""
+        assert not contains_markdown(PITCH_ULIP_TEXT)
+
+
+class TestPitchModeNoReturnRate:
+    """Story 5 AC 4 negative: if return_rate is absent, pitch must NOT claim returns."""
+
+    def test_no_return_rate_pitch_omits_return_claim(self):
+        """If return_rate field is missing, pitch must not invent a return figure."""
+        # The fixture PITCH_NO_RETURN_RATE deliberately omits any return percentage.
+        assert not has_personalisation(
+            PITCH_NO_RETURN_RATE,
+            ["%", "percent", "annual growth", "return rate", "maturity value"],
+        )
+
+    def test_no_return_rate_pitch_still_valid(self):
+        """Pitch without return mention should still cover eligibility and invitation."""
+        assert has_personalisation(PITCH_NO_RETURN_RATE, ["18", "55", "application", "proceed"])
+

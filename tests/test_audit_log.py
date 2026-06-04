@@ -10,15 +10,138 @@ google.cloud.logging is mocked — no live GCP calls are made.
 """
 
 import sys
+import types
 import pathlib
 from unittest.mock import MagicMock, patch, call
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# T5a MERGE NOTE — ensure agent_builder/ is on sys.path BEFORE any sibling-module
+# stubbing below, so that other tests in the same pytest session that try to
+# `from intake import QUESTIONS / _strip_name_prefix / etc.` get the REAL
+# intake.py, not the minimal stub we install at line ~88. Without this guard
+# T2 (test_t2_warmth_bugf.py) and T4 (test_t4_bug_a_name_prefix.py) fail to
+# collect when test_audit_log is imported first.
+# ---------------------------------------------------------------------------
+_agent_builder_early = pathlib.Path(__file__).parent.parent / "agent_builder"
+if str(_agent_builder_early) not in sys.path:
+    sys.path.insert(0, str(_agent_builder_early))
+
+# ---------------------------------------------------------------------------
+# Stub heavy runtime dependencies so agent_builder/main.py is importable
+# in a bare test environment (no fastapi / google-adk / google-genai installed).
+# We only need the minimal surface used at import time.  google.cloud.logging
+# is left un-stubbed here because main.py wraps it in try/except already.
+# ---------------------------------------------------------------------------
+def _stub(name, **attrs):
+    m = types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(m, k, v)
+    return m
+
+
+def _try_real_or_stub(modname, **stub_attrs):
+    """T5a — only install a stub if the real module can't be imported.
+
+    This prevents test_audit_log from poisoning sys.modules for sibling tests
+    (like test_t3_arc_inproc, test_orchestration_guardrail) that need the real
+    fastapi/google packages. Real install wins.
+    """
+    if modname in sys.modules:
+        return  # already loaded (real or stubbed)
+    try:
+        __import__(modname)
+    except Exception:
+        sys.modules[modname] = _stub(modname, **stub_attrs)
+
+
+# google.adk namespace hierarchy — must be stubbed because main.py instantiates
+# a real Runner at module load. setdefault keeps a real install if present in
+# sys.modules already, but we DO want to force the stub if it isn't. Note:
+# even if google-adk is pip-installed, we still stub here because main.py's
+# Runner(...) call requires a real LlmAgent which we can't construct without
+# actual env vars + GCP creds.
+for _adk_mod in (
+    "google.adk",
+    "google.adk.runners",
+    "google.adk.sessions",
+    "google.adk.agents",
+    "google.adk.tools",
+    "google.adk.tools.mcp",
+    "google.adk.tools.function_tool",
+):
+    sys.modules.setdefault(
+        _adk_mod,
+        _stub(
+            _adk_mod,
+            Runner=MagicMock,
+            InMemorySessionService=MagicMock,
+            LlmAgent=MagicMock,
+            MCPToolset=MagicMock,
+            FunctionTool=MagicMock,
+            AgentTool=MagicMock,
+        ),
+    )
+# Attach adk onto the google namespace package
+_google_mod = sys.modules.get("google")
+if _google_mod is None:
+    _google_mod = _stub("google")
+    sys.modules["google"] = _google_mod
+if not hasattr(_google_mod, "adk"):
+    _google_mod.adk = sys.modules["google.adk"]
+
+# google.genai + google.genai.types
+_genai_types_stub = _stub("google.genai.types")
+_genai_stub = _stub("google.genai", types=_genai_types_stub)
+sys.modules.setdefault("google.genai", _genai_stub)
+sys.modules.setdefault("google.genai.types", _genai_types_stub)
+if not hasattr(_google_mod, "genai"):
+    _google_mod.genai = _genai_stub
+
+# fastapi — try real first; only stub if missing. Stubbing fastapi as a plain
+# module (not package) breaks `fastapi.testclient` for sibling tests in the
+# same pytest session (T3 in-proc arc tests need TestClient).
+_try_real_or_stub("fastapi", FastAPI=MagicMock, HTTPException=MagicMock)
+_try_real_or_stub("fastapi.responses", JSONResponse=MagicMock)
+_try_real_or_stub("fastapi.staticfiles", StaticFiles=MagicMock)
+
+# agent_definition and intake (sibling modules that live in agent_builder/)
+# T5a MERGE — try real import first; only stub if unavailable. This keeps T2/T4
+# tests working when they need the real intake module in the same session.
+if "agent_definition" not in sys.modules:
+    try:
+        import agent_definition  # noqa: F401
+    except Exception:
+        sys.modules["agent_definition"] = _stub(
+            "agent_definition",
+            root_agent=MagicMock(),
+            search_products=MagicMock(),
+            compliance_check=MagicMock(),
+            rank_products=MagicMock(),
+        )
+if "intake" not in sys.modules:
+    try:
+        import intake  # noqa: F401
+    except Exception:
+        sys.modules["intake"] = _stub(
+            "intake",
+            handle_intake=MagicMock(),
+            build_synthetic_message=MagicMock(),
+        )
+
+# ---------------------------------------------------------------------------
 # Ensure agent_builder/ is on the path so we can import main
+# ---------------------------------------------------------------------------
 _agent_builder = pathlib.Path(__file__).parent.parent / "agent_builder"
 if str(_agent_builder) not in sys.path:
     sys.path.insert(0, str(_agent_builder))
+
+# Pre-import main so it is cached in sys.modules["main"] as agent_builder/main.
+# Without this, patch("main._gcp_logger", ...) could resolve "main" to a
+# different module loaded by another test file during pytest collection.
+if "main" not in sys.modules:
+    import main  # noqa: F401  (import for side-effect: cache in sys.modules)
 
 
 # ---------------------------------------------------------------------------

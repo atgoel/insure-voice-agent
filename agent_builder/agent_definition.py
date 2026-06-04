@@ -24,6 +24,7 @@ Env vars required at runtime:
     ELASTIC_MCP_SERVER_URL  — Cloud Run service URL (set by cloudbuild.yaml)
     COMPLIANCE_CHECK_URL    — Cloud Function URL
     RANK_PRODUCTS_URL       — Cloud Function URL
+    SIMULATE_PREMIUM_URL    — Cloud Function URL (Story 6 — may be empty for local dev)
 """
 
 import os
@@ -44,6 +45,7 @@ ELASTIC_MCP_SERVER_URL        = os.environ["ELASTIC_MCP_SERVER_URL"]   # REST tr
 ELASTIC_MCP_SERVER_NATIVE_URL = os.environ["ELASTIC_MCP_SERVER_NATIVE_URL"]  # MCP-native transport
 COMPLIANCE_CHECK_URL          = os.environ["COMPLIANCE_CHECK_URL"]
 RANK_PRODUCTS_URL             = os.environ["RANK_PRODUCTS_URL"]
+SIMULATE_PREMIUM_URL          = os.environ.get("SIMULATE_PREMIUM_URL", "")   # optional — Story 6
 
 # ---------------------------------------------------------------------------
 # HTTP call helpers for compliance_check, rank_products, and search_products
@@ -341,6 +343,78 @@ def rank_products(
 
 
 # ---------------------------------------------------------------------------
+# Story 6 — Premium simulation (deterministic, no LLM)
+# Proxies to the simulate_premium Cloud Function which calculates premiums
+# using the actuarial formula: FV annuity + age/smoker loadings from catalog.
+# Constitution §II: agent must NEVER compute or infer premium figures itself.
+# ---------------------------------------------------------------------------
+
+def simulate_premium(
+    product_id: str,
+    sum_assured: int,
+    customer_age: int,
+    is_smoker: bool,
+    premium_frequency: str,
+    policy_term: int,
+    tool_context: ToolContext = None,
+) -> dict:
+    """Calculate deterministic premium and projected returns for an insurance product.
+
+    Args:
+        product_id: Product catalog ID (e.g. "ULIP001", "TERM002").
+        sum_assured: Cover amount in INR (minimum 100000).
+        customer_age: Customer's age in years.
+        is_smoker: Whether the customer is a smoker.
+        premium_frequency: Payment frequency — "monthly", "quarterly",
+            "semi_annual", or "annual".
+        policy_term: Policy duration in years (must be in product's
+            available_terms list in the catalog).
+
+    Returns:
+        {
+            "product_id": str,
+            "product_name": str,
+            "product_type": str,
+            "period_premium": float,
+            "annual_premium": float,
+            "total_premium_outflow": float,
+            "projected_maturity_value": float | None,  # None for protection products
+            "net_gain": float | None,                   # None for protection products
+            "simulation_inputs": dict,
+            "formula_breakdown": dict
+        }
+        On error: {"error": "<message>"}
+    """
+    if not SIMULATE_PREMIUM_URL:
+        return {"error": "simulate_premium service not configured (SIMULATE_PREMIUM_URL not set)"}
+    payload = {
+        "product_id": product_id,
+        "sum_assured": sum_assured,
+        "customer_age": customer_age,
+        "is_smoker": is_smoker,
+        "premium_frequency": premium_frequency,
+        "policy_term": policy_term,
+    }
+    try:
+        resp = httpx.post(SIMULATE_PREMIUM_URL, json=payload, timeout=5.0)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.TimeoutException as exc:
+        return {"error": f"simulate_premium timed out: {exc}"}
+    except httpx.HTTPStatusError as exc:
+        try:
+            detail = exc.response.json()
+        except Exception:
+            detail = {}
+        return {
+            "error": f"simulate_premium HTTP {exc.response.status_code}",
+            "validation_errors": detail.get("validation_errors", []),
+        }
+    except Exception as exc:
+        return {"error": f"simulate_premium unavailable: {exc}"}
+
+
+# ---------------------------------------------------------------------------
 # Stability C.5 — Mid-pipeline tool-call enforcement (mode=ANY) via callback
 # ---------------------------------------------------------------------------
 # Without this callback, flash-lite probabilistically emits empty final
@@ -473,6 +547,13 @@ root_agent = LlmAgent(
         # Tool 3: Rank products — suitability scoring (Cloud Function)
         # ---------------------------------------------------------------
         FunctionTool(rank_products),
+
+        # ---------------------------------------------------------------
+        # Tool 3b: Premium Simulation — Story 6 (deterministic Cloud Function)
+        # Calculates actuarial premiums + projected maturity value from catalog.
+        # Constitution §II: agent MUST call this tool; MUST NOT compute figures.
+        # ---------------------------------------------------------------
+        FunctionTool(simulate_premium),
 
         # ---------------------------------------------------------------
         # Tool 4: Recommendation Explainer — Sub-Agent 3 (LlmAgent)

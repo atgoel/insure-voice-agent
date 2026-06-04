@@ -22,6 +22,21 @@ Contracts:
         Written by main.py AFTER top3_enriched is built (one write per pipeline run).
         Read by followup.py for deterministic single-product voice text + ordinal refs.
 
+    CONTACT_BY_SESSION: dict[str, dict] (T3)
+        Contact-capture state per session keyed by ADK session_id.
+        Schema per session:
+            {"state": "NONE"|"ASKED"|"AWAITING_EMAIL"|"CAPTURED"|"DECLINED",
+             "email": str|None,
+             "invalid_attempts": int}
+        Written by main.py at three sites:
+            1. After first recommendation render (NONE → ASKED + suffix appended).
+            2. In the else-branch FSM (ASKED → AWAITING_EMAIL/DECLINED;
+               AWAITING_EMAIL → CAPTURED/AWAITING_EMAIL/DECLINED).
+            3. On reset / done-intent (popped/cleared).
+        PII discipline: full email lives ONLY in this dict and in the user-facing
+        voice text. Logs use _email_domain() per followup.py §5.8.
+        See SPEC v2 §5 for state-transition table.
+
 Lifecycle: process-lifetime. For multi-instance deploys this would need
 Firestore; hackathon runs with --max-instances=1 so RAM is sufficient.
 
@@ -32,3 +47,9 @@ simple LRU. Not in scope for Day 6.
 
 PROFILE_BY_SESSION: dict = {}
 TOP3_BY_SESSION: dict = {}
+
+# T3 — Contact capture state per session.
+# Schema per session:
+#   {"state": "NONE"|"ASKED"|"AWAITING_EMAIL"|"CAPTURED"|"DECLINED",
+#    "email": str|None, "invalid_attempts": int}
+CONTACT_BY_SESSION: dict = {}

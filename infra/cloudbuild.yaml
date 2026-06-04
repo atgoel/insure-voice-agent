@@ -195,6 +195,37 @@ steps:
           --role=roles/run.invoker || true
 
   # ---------------------------------------------------------------------------
+  # Step 4c-sim: Deploy simulate_premium Cloud Function (Story 6 — deterministic)
+  #   No shared/ dependency — function is self-contained with inline catalog.
+  #   Captures the HTTPS endpoint URL → /workspace/simulate_url.txt
+  #   Consumed by Step 6 (agent runner SIMULATE_PREMIUM_URL env var).
+  # ---------------------------------------------------------------------------
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-simulate-premium
+    waitFor: [deploy-rank-products]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud functions deploy simulate_premium \
+          --runtime=python311 \
+          --trigger-http \
+          --source=functions/simulate_premium \
+          --entry-point=simulate_premium \
+          --region=${_REGION} \
+          --gen2
+        # Grant public invoker access on the underlying Cloud Run service
+        gcloud run services add-iam-policy-binding simulate-premium \
+          --region=${_REGION} \
+          --member=allUsers \
+          --role=roles/run.invoker || true
+
+        SIMULATE_URL=$$(gcloud functions describe simulate_premium \
+          --gen2 --region=${_REGION} --format='value(serviceConfig.uri)')
+        echo "simulate_premium: $$SIMULATE_URL"
+        echo -n "$$SIMULATE_URL" > /workspace/simulate_url.txt
+
+  # ---------------------------------------------------------------------------
   # Step 4c: Copy frontend/ folder into agent_builder/ so Docker build context
   # includes the static UI files. Mirrors the shared/ copy pattern (Step 3a/4a).
   # The agent service then serves index.html + app.js + simulation.js + style.css
@@ -245,13 +276,14 @@ steps:
   # ---------------------------------------------------------------------------
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: deploy-agent-runner
-    waitFor: [push-agent-image, deploy-mcp-server, deploy-mcp-native-server, deploy-compliance-check, deploy-rank-products]
+    waitFor: [push-agent-image, deploy-mcp-server, deploy-mcp-native-server, deploy-compliance-check, deploy-rank-products, deploy-simulate-premium]
     entrypoint: bash
     args:
       - -c
       - |
         MCP_URL=$$(cat /workspace/mcp_url.txt)
         MCP_NATIVE_URL=$$(cat /workspace/mcp_native_url.txt)
+        SIMULATE_URL=$$(cat /workspace/simulate_url.txt)
         COMPLIANCE_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/compliance_check"
         RANK_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/rank_products"
 
@@ -263,7 +295,7 @@ steps:
           --port=8080 \
           --min-instances=1 \
           --max-instances=1 \
-          --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,ELASTIC_MCP_SERVER_NATIVE_URL=$$MCP_NATIVE_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
+          --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,ELASTIC_MCP_SERVER_NATIVE_URL=$$MCP_NATIVE_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,SIMULATE_PREMIUM_URL=$$SIMULATE_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
 
         AGENT_URL=$$(gcloud run services describe insure-voice-agent \
           --region=${_REGION} --format='value(status.url)')
@@ -283,6 +315,7 @@ steps:
       - |
         MCP_URL=$$(cat /workspace/mcp_url.txt)
         MCP_NATIVE_URL=$$(cat /workspace/mcp_native_url.txt)
+        SIMULATE_URL=$$(cat /workspace/simulate_url.txt)
         AGENT_URL=$$(cat /workspace/agent_url.txt)
         echo "============================================================"
         echo "  InsureVoice Deployment Summary"
@@ -300,6 +333,9 @@ steps:
         echo ""
         echo "  rank_products (Cloud Function)"
         echo "    https://${_REGION}-$PROJECT_ID.cloudfunctions.net/rank_products"
+        echo ""
+        echo "  simulate_premium (Cloud Function — Story 6)"
+        echo "    $$SIMULATE_URL"
         echo ""
         echo "  insure-voice-agent (Cloud Run — ADK agent runner)"
         echo "    Health: $$AGENT_URL/health"

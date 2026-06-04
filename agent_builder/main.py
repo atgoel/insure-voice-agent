@@ -12,6 +12,7 @@ Env vars (injected by Cloud Build at deploy time):
     ELASTIC_MCP_SERVER_URL   — Cloud Run URL of elastic_mcp_server
     COMPLIANCE_CHECK_URL     — Cloud Function URL for compliance_check
     RANK_PRODUCTS_URL        — Cloud Function URL for rank_products
+    SIMULATE_PREMIUM_URL     — Cloud Function URL for simulate_premium
     GOOGLE_GENAI_USE_VERTEXAI — "TRUE" (uses ADC/Vertex AI; no API key needed on GCP)
     GOOGLE_CLOUD_PROJECT     — GCP project ID (set automatically on Cloud Run)
     PORT                     — port to listen on (set automatically by Cloud Run)
@@ -33,6 +34,7 @@ _log.basicConfig(
 )
 
 import uvicorn
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from google.adk.runners import Runner
@@ -42,6 +44,11 @@ from google.genai import types as genai_types
 # agent_definition.py lives alongside this file in the container (/app/)
 from agent_definition import root_agent, search_products, compliance_check, rank_products
 from intake import handle_intake, build_synthetic_message
+
+# ---------------------------------------------------------------------------
+# Env vars injected by Cloud Build at deploy time
+# ---------------------------------------------------------------------------
+SIMULATE_PREMIUM_URL: str = os.getenv("SIMULATE_PREMIUM_URL", "")
 
 # P.2 — Intake state persistence. ADK's InMemorySessionService does not
 # reliably persist mutations to session.state across get_session calls in
@@ -85,6 +92,39 @@ def _sanitize_product(p):
         else:
             out[k] = v
     return out
+
+
+# Stability T1-B — defensive bail-out detection. flash-lite occasionally
+# emits the sub-agent's "I wasn't able to find eligible products" bail-out
+# string DESPITE rank_products having returned >=1 product. This happens
+# because AgentTool's structured-data threading is unreliable (L-002): the
+# LLM may pass top3=[null] to recommend_and_explain even though
+# rank_products produced a real list. When detected, clear response_text
+# so the C.5b deterministic template at line 525 fires instead.
+#
+# IMPORTANT: This pattern list MIRRORS the bail-out string in
+# sub_agent3_explainer_prompt.md (the line that says "If `top3` is empty
+# - return: I wasn't able to find eligible products for your profile.").
+# If you edit that prompt line, update _BAILOUT_PHRASES below to match.
+_BAILOUT_PHRASES = (
+    "i wasn't able to find eligible products",
+    "i was not able to find eligible products",
+    "no eligible products for your profile",
+    "no products match your profile",
+    # Day 7 live test additions — sub-agent emits these variants too:
+    "i could not find products matching",
+    "could not find products matching your criteria",
+    "broaden your goal",
+    "could you broaden",
+)
+
+
+def _looks_like_bailout(s: str) -> bool:
+    if not s:
+        return False
+    s_lower = s.strip().lower()
+    return any(p in s_lower for p in _BAILOUT_PHRASES)
+
 
 # ---------------------------------------------------------------------------
 # Audit logging — Cloud Logging on GCP, stdlib fallback for local dev
@@ -172,6 +212,10 @@ async def invoke(body: dict) -> JSONResponse:
 
     session_id: str = body.get("session_id") or str(uuid.uuid4())
     user_id: str = body.get("user_id") or "voice-user"
+    # Story 5 — channel flag: "voice" (default, ≤120-word limit) or "text" (full detail)
+    channel: str = body.get("channel", "voice")
+    if channel not in ("voice", "text"):
+        channel = "voice"
 
     # Create session if it doesn't exist (handles first turn of multi-turn)
     existing = await _session_service.get_session(
@@ -200,9 +244,14 @@ async def invoke(body: dict) -> JSONResponse:
             except Exception:
                 pass
             try:
-                from shared_state import PROFILE_BY_SESSION as _PBS, TOP3_BY_SESSION as _TBS
+                from shared_state import (
+                    PROFILE_BY_SESSION as _PBS,
+                    TOP3_BY_SESSION as _TBS,
+                    CONTACT_BY_SESSION as _CBS,
+                )
                 _PBS.pop(session_id, None)
                 _TBS.pop(session_id, None)
+                _CBS.pop(session_id, None)
             except Exception:
                 pass
             try:
@@ -256,6 +305,8 @@ async def invoke(body: dict) -> JSONResponse:
         except Exception:
             pass
         synthetic = build_synthetic_message(intake_result["profile"])
+        if channel == "text":
+            synthetic += " [CHANNEL: text — full structured detail permitted, no 120-word limit]"
         try:
             _log.info("INTAKE_COMPLETE session=%s synthetic=%s", session_id[:8], synthetic[:200])
         except Exception:
@@ -268,6 +319,149 @@ async def invoke(body: dict) -> JSONResponse:
         # Intake already complete in a prior turn (follow-up / multi-turn after
         # recommendations) — first try deterministic follow-up handling, then
         # fall back to the LLM if we can't resolve the intent.
+
+        # ============================================================
+        # T3 — Farewell flow (Bug D + Bug I deterministic). Priority #1
+        # in the dispatch chain. Per SPEC v2 §4.5 — checked BEFORE S3
+        # named/ordinal/reset matchers. Anchored patterns mean
+        # 'I'm good with health insurance' falls through to S3/LLM.
+        # ============================================================
+        try:
+            from followup import is_done_intent, farewell_voice_text
+            if is_done_intent(message):
+                # Side-effect (per SPEC v2 §4.4) — clear contact state so a
+                # subsequent reset/restart doesn't leak prior ASKED state.
+                try:
+                    from shared_state import CONTACT_BY_SESSION as _CBS_FAREWELL
+                    _CBS_FAREWELL.pop(session_id, None)
+                except Exception:
+                    pass
+                try:
+                    _log.info(
+                        "T3_FAREWELL_HIT session=%s pattern=%r",
+                        session_id[:8], message[:40],
+                    )
+                except Exception:
+                    pass
+                return JSONResponse(
+                    status_code=200,
+                    content={"session_id": session_id, "response": farewell_voice_text()},
+                )
+        except Exception:
+            try:
+                _log.exception("T3_FAREWELL_DETECT_FAILED session=%s — falling through", session_id[:8])
+            except Exception:
+                pass
+
+        # ============================================================
+        # T3 — Contact-capture FSM. Priority #2 — handles ASKED and
+        # AWAITING_EMAIL states. Per SPEC v2 §5.9.
+        # ============================================================
+        try:
+            from shared_state import CONTACT_BY_SESSION as _CBS
+            from followup import (
+                is_yes_intent,
+                is_no_intent,
+                extract_email,
+                _email_domain,
+                contact_yes_voice_text,
+                contact_invalid_voice_text,
+                contact_giveup_voice_text,
+                contact_captured_voice_text,
+            )
+            _contact_state = _CBS.get(session_id) or {
+                "state": "NONE", "email": None, "invalid_attempts": 0,
+            }
+            _cstate = _contact_state.get("state", "NONE")
+
+            if _cstate == "ASKED":
+                if is_yes_intent(message):
+                    _CBS[session_id] = {
+                        "state": "AWAITING_EMAIL", "email": None, "invalid_attempts": 0,
+                    }
+                    try:
+                        _log.info("T3_CONTACT_YES session=%s", session_id[:8])
+                    except Exception:
+                        pass
+                    return JSONResponse(
+                        status_code=200,
+                        content={"session_id": session_id, "response": contact_yes_voice_text()},
+                    )
+                elif is_no_intent(message):
+                    _CBS[session_id] = {
+                        "state": "DECLINED", "email": None, "invalid_attempts": 0,
+                    }
+                    try:
+                        _log.info("T3_CONTACT_NO session=%s", session_id[:8])
+                    except Exception:
+                        pass
+                    # Fall through — let S3 / LLM handle the rest of the turn,
+                    # but the suffix won't be re-appended on future turns.
+                # else: not yes/no — fall through to S3/LLM as a normal turn.
+
+            elif _cstate == "AWAITING_EMAIL":
+                _email = extract_email(message)
+                if _email:
+                    _CBS[session_id] = {
+                        "state": "CAPTURED", "email": _email, "invalid_attempts": 0,
+                    }
+                    try:
+                        _log.info(
+                            "T3_CONTACT_CAPTURED session=%s domain=%s",
+                            session_id[:8], _email_domain(_email),
+                        )
+                    except Exception:
+                        pass
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "session_id": session_id,
+                            "response": contact_captured_voice_text(_email),
+                        },
+                    )
+                else:
+                    _attempts = int(_contact_state.get("invalid_attempts", 0)) + 1
+                    if _attempts >= 2:
+                        # Give up — transition to DECLINED with giveup text.
+                        _CBS[session_id] = {
+                            "state": "DECLINED", "email": None,
+                            "invalid_attempts": _attempts,
+                        }
+                        try:
+                            _log.info("T3_CONTACT_GIVEUP session=%s", session_id[:8])
+                        except Exception:
+                            pass
+                        return JSONResponse(
+                            status_code=200,
+                            content={
+                                "session_id": session_id,
+                                "response": contact_giveup_voice_text(),
+                            },
+                        )
+                    else:
+                        _CBS[session_id] = {
+                            "state": "AWAITING_EMAIL", "email": None,
+                            "invalid_attempts": _attempts,
+                        }
+                        try:
+                            _log.info(
+                                "T3_CONTACT_EMAIL_INVALID session=%s attempt=%d",
+                                session_id[:8], _attempts,
+                            )
+                        except Exception:
+                            pass
+                        return JSONResponse(
+                            status_code=200,
+                            content={
+                                "session_id": session_id,
+                                "response": contact_invalid_voice_text(),
+                            },
+                        )
+        except Exception:
+            try:
+                _log.exception("T3_CONTACT_FSM_FAILED session=%s — falling through", session_id[:8])
+            except Exception:
+                pass
 
         # S3 — Deterministic follow-up handling. Detects intent + resolves to
         # a single top3 product, returns a templated voice summary. Bypasses
@@ -459,6 +653,22 @@ async def invoke(body: dict) -> JSONResponse:
             if isinstance(harvested, str) and harvested.strip():
                 response_text = harvested
 
+    # Stability T1-B — defensive bail-out override. If the sub-agent emitted
+    # a bail-out string but rank_products produced >=1 product, clear
+    # response_text so the C.5b deterministic template at line 525 wins.
+    # (See _BAILOUT_PHRASES + _looks_like_bailout above for the pattern list.)
+    _rank_for_bailout = (_tool_results.get("rank_products") or {})
+    _top3_for_bailout = _rank_for_bailout.get("top_3") or _rank_for_bailout.get("top3") or []
+    if _looks_like_bailout(response_text) and len(_top3_for_bailout) >= 1:
+        try:
+            _log.info(
+                "T1B_BAILOUT_OVERRIDE session=%s text_len=%d n_top3=%d",
+                session_id[:8], len(response_text), len(_top3_for_bailout),
+            )
+        except Exception:
+            pass
+        response_text = ""  # force C.5b deterministic template at line 525 to fire
+
     # Stability P.2/C.5b — programmatic pipeline completion. flash-lite
     # occasionally emits final=[] WITHOUT calling any tools (right after
     # receiving the synthetic message), or skips compliance/rank mid-pipeline.
@@ -492,11 +702,34 @@ async def invoke(body: dict) -> JSONResponse:
             if "search_products" not in _tool_results:
                 _query_words = _validated_profile.get("coverage_goals") or ["term life insurance"]
                 _query = " ".join(_query_words).replace("_", " ") + " insurance"
+                # T1-C - programmatic fallback parity with S2' injection. The
+                # LLM-driven path's S2' injection (agent_definition.py:99-153) is
+                # gated on `tool_context is not None`. The programmatic path passes
+                # tool_context=None (we have no real ToolContext here), so we must
+                # pass product_type explicitly to preserve the same product_type
+                # filter the LLM-driven first call used. H-C1 confirmed in
+                # session bc2396e6 investigation log.
+                _pt_from_profile = None
+                try:
+                    _goals_for_pt = _validated_profile.get("coverage_goals") or []
+                    if isinstance(_goals_for_pt, list) and _goals_for_pt:
+                        _pt_from_profile = _goals_for_pt[0]
+                    elif isinstance(_goals_for_pt, str) and _goals_for_pt.strip():
+                        _pt_from_profile = _goals_for_pt.strip()
+                    if _pt_from_profile:
+                        _log.info(
+                            "T1C_PROGRAMMATIC_PT_INJECT session=%s product_type=%r",
+                            session_id[:8], _pt_from_profile,
+                        )
+                except Exception:
+                    _pt_from_profile = None
+
                 _search_result = search_products(
                     query=_query,
                     customer_age=_profile["age"],
                     is_smoker=_profile["smoker"],
                     income=_profile["income"],
+                    product_type=_pt_from_profile,   # T1-C - forwards intake's product_type
                     size=5,
                     tool_context=None,
                 )
@@ -554,15 +787,52 @@ async def invoke(body: dict) -> JSONResponse:
                 _line += "."
                 _lines.append(_line)
             response_text = (
-                "Based on your profile, here are my top recommendations. "
+                "Based on what you shared, here are my top three picks. "
                 + " ".join(_lines)
-                + " Would you like more details on any of these?"
+                + " Want me to tell you more about any of these?"
             )
             try:
                 import logging as _l
                 _l.getLogger().info("DETERMINISTIC_FALLBACK_FIRED session=%s n_products=%d", session_id[:8], len(_top))
             except Exception:
                 pass
+
+    # ============================================================
+    # T3 — Contact-capture trigger (LOCKED INSERTION POINT — SPEC v2 Fix #2)
+    # OUTER INDENT (4 spaces). Fires on EVERY render path that produced top3,
+    # not only the deterministic-template path. Guards prevent re-asking on
+    # non-pipeline turns (follow-up "tell me about X") and double-asking after
+    # state has already advanced past NONE.
+    # ============================================================
+    try:
+        from shared_state import CONTACT_BY_SESSION as _CBS_TRIGGER
+        from followup import contact_ask_suffix as _contact_ask_suffix
+        _contact_now = _CBS_TRIGGER.get(session_id) or {
+            "state": "NONE", "email": None, "invalid_attempts": 0,
+        }
+        # _has_top3_now: any pipeline-render path that produced ranked products.
+        _rank_for_trigger = _tool_results.get("rank_products", {}) or {}
+        _has_top3_now = bool(
+            _rank_for_trigger.get("top_3") or _rank_for_trigger.get("top3")
+        )
+        if (
+            _contact_now.get("state") == "NONE"
+            and _has_top3_now
+            and response_text
+        ):
+            response_text = response_text.rstrip() + _contact_ask_suffix()
+            _CBS_TRIGGER[session_id] = {
+                "state": "ASKED", "email": None, "invalid_attempts": 0,
+            }
+            try:
+                _log.info("T3_CONTACT_ASK session=%s", session_id[:8])
+            except Exception:
+                pass
+    except Exception:
+        try:
+            _log.exception("T3_CONTACT_TRIGGER_FAILED session=%s — falling through", session_id[:8])
+        except Exception:
+            pass
 
     # Write PII-free audit log entry (Constitution §IV + §V)
     _write_audit_log({
@@ -595,7 +865,7 @@ async def invoke(body: dict) -> JSONResponse:
         or "rank_products" in _tool_results
     )
 
-    response_payload: dict = {"session_id": session_id, "response": response_text}
+    response_payload: dict = {"session_id": session_id, "response": response_text, "channel": channel}
 
     if _has_pipeline_call:
         _search_candidates = _tool_results.get("search_products", {}).get("candidates", [])
@@ -609,6 +879,20 @@ async def invoke(body: dict) -> JSONResponse:
             or _rank.get("top3")
             or _tool_results.get("compliance_check", {}).get("passed", [])
         )
+        # T1-C-gamma - defense-in-depth product_type consistency. If S2' or
+        # programmatic injection failed somewhere upstream, ELSER may have
+        # returned mixed types. Re-filter against intake's coverage_goals[0]
+        # as a final safeguard before snapshot. Logs T1C_TYPE_MISMATCH_DROP.
+        _intake_pt = None
+        try:
+            _goals_for_filter = (_validated_profile or {}).get("coverage_goals") or []
+            if isinstance(_goals_for_filter, list) and _goals_for_filter:
+                _intake_pt = _goals_for_filter[0]
+            elif isinstance(_goals_for_filter, str) and _goals_for_filter.strip():
+                _intake_pt = _goals_for_filter.strip()
+        except Exception:
+            _intake_pt = None
+
         top3_enriched = []
         for idx, item in enumerate(_top_3_raw):
             # rank_products returns {rank, product:{...full...}, suitability_score, score_breakdown}
@@ -618,6 +902,23 @@ async def invoke(body: dict) -> JSONResponse:
             pid = base.get("product_id") or base.get("id")
             full = _id_to_product.get(pid, {})
             merged = {**full, **base, "rank": idx + 1}
+            # T1-C-gamma - drop mismatched product_type before snapshot.
+            if (
+                _intake_pt
+                and merged.get("product_type")
+                and merged.get("product_type") != _intake_pt
+            ):
+                try:
+                    _log.warning(
+                        "T1C_TYPE_MISMATCH_DROP session=%s expected=%r got=%r product=%r",
+                        session_id[:8],
+                        _intake_pt,
+                        merged.get("product_type"),
+                        merged.get("name", "?")[:40],
+                    )
+                except Exception:
+                    pass
+                continue  # skip this product
             if merged:
                 # F.2 — Unicode garble fix on outbound product (₹ etc.)
                 top3_enriched.append(_sanitize_product(merged))
@@ -657,6 +958,43 @@ async def invoke(body: dict) -> JSONResponse:
         response_payload["rejected"] = rejected_with_reason
 
     return JSONResponse(content=response_payload, status_code=200)
+
+
+# ---------------------------------------------------------------------------
+# Premium Simulation proxy — Story 6
+# Forwards requests to the deterministic simulate_premium Cloud Function.
+# No LLM is involved; this is a pure pass-through for the FE simulation panel.
+# ---------------------------------------------------------------------------
+
+@app.post("/simulate")
+async def simulate(body: dict) -> JSONResponse:
+    """
+    Calculate deterministic premium and projected returns for an insurance product.
+
+    Proxies the request to the simulate_premium Cloud Function.
+
+    Request body (same as simulate_premium function):
+        {
+            "product_id":        "ULIP001",
+            "sum_assured":       5000000,
+            "customer_age":      35,
+            "is_smoker":         false,
+            "premium_frequency": "monthly",
+            "policy_term":       15
+        }
+
+    Response: see simulate_premium Cloud Function for full response schema.
+    """
+    if not SIMULATE_PREMIUM_URL:
+        raise HTTPException(status_code=503, detail="Simulation service not configured")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(SIMULATE_PREMIUM_URL, json=body, timeout=5.0)
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Simulation service timed out")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Simulation service error: {exc}")
 
 
 # ---------------------------------------------------------------------------

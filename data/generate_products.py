@@ -917,6 +917,501 @@ ALL_PRODUCTS = (
     + CHILD_PLAN_PRODUCTS
 )
 
+# ---------------------------------------------------------------------------
+# Simulation data — Story 6 (Premium Simulation)
+# Deterministic fields used by functions/simulate_premium/main.py.
+# LLMs must NEVER infer premium or return figures — all values come from here.
+#
+# base_rate_per_lakh : annual base premium per ₹1 lakh of sum_assured (INR)
+# age_bands          : list of {min_age, max_age, loading_pct} — additive % loading
+# smoker_loading_pct : extra % premium for smokers (irrelevant if smoker_eligible=False)
+# frequency_multipliers : annual-equivalent scaling per payment frequency
+#   (values < 1.0 = discount for less-frequent payment; monthly = reference=1.0)
+# benefits           : key benefit bullets for pitch (Story 5)
+# eligibility_summary: one-line eligibility text for pitch (Story 5)
+# return_rate        : annual % return for savings products (None = protection-only)
+# available_terms    : valid policy terms in years
+# ---------------------------------------------------------------------------
+
+_FREQ_STD = {"monthly": 1.0, "quarterly": 0.99, "semi_annual": 0.975, "annual": 0.95}
+
+_AGE_BANDS_STD = [
+    {"min_age": 18, "max_age": 30, "loading_pct": 0},
+    {"min_age": 31, "max_age": 45, "loading_pct": 15},
+    {"min_age": 46, "max_age": 60, "loading_pct": 35},
+    {"min_age": 61, "max_age": 95, "loading_pct": 60},
+]
+_AGE_BANDS_SENIOR = [
+    {"min_age": 40, "max_age": 55, "loading_pct": 0},
+    {"min_age": 56, "max_age": 65, "loading_pct": 20},
+    {"min_age": 66, "max_age": 80, "loading_pct": 45},
+]
+_AGE_BANDS_YOUNG = [
+    {"min_age": 18, "max_age": 30, "loading_pct": 0},
+    {"min_age": 31, "max_age": 45, "loading_pct": 20},
+    {"min_age": 46, "max_age": 60, "loading_pct": 45},
+]
+
+SIMULATION_DATA: dict = {
+    # ── Term Life ──────────────────────────────────────────────────────────
+    "TERM001": {
+        "base_rate_per_lakh": 55,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Pure life cover — 100% death benefit paid to nominees",
+            "Accidental death benefit rider (optional)",
+            "Global coverage including international travel",
+            "Free-look period of 15 days",
+        ],
+        "eligibility_summary": "Age 18–65, annual income ≥ ₹3L, non-smokers only",
+        "return_rate": None,
+        "available_terms": [10, 15, 20, 25, 30],
+    },
+    "TERM002": {
+        "base_rate_per_lakh": 65,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 30,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Increasing sum assured option — cover grows with inflation",
+            "Smoker and non-smoker both eligible",
+            "Optional critical illness acceleration rider",
+            "Flexible premium payment terms",
+        ],
+        "eligibility_summary": "Age 25–55, annual income ≥ ₹3L, smokers and non-smokers eligible",
+        "return_rate": None,
+        "available_terms": [10, 15, 20, 25, 30],
+    },
+    "TERM003": {
+        "base_rate_per_lakh": 60,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 25,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "₹3 crore guaranteed death benefit",
+            "Joint life option — cover spouse under same policy",
+            "Waiver of premium rider available",
+            "Broad age eligibility up to 75",
+        ],
+        "eligibility_summary": "Age 18–75, annual income ≥ ₹5L, smokers and non-smokers eligible",
+        "return_rate": None,
+        "available_terms": [10, 15, 20, 25, 30],
+    },
+    "TERM004": {
+        "base_rate_per_lakh": 48,
+        "age_bands": _AGE_BANDS_YOUNG,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Lowest premiums for non-smokers aged 30–45",
+            "Return of premium variant available at maturity",
+            "Early entry discount locked in for full term",
+            "Premium stays fixed for entire term",
+        ],
+        "eligibility_summary": "Age 30–60, annual income ≥ ₹4L, non-smokers only",
+        "return_rate": None,
+        "available_terms": [10, 15, 20, 25, 30],
+    },
+    # ── Health ─────────────────────────────────────────────────────────────
+    "HLTH001": {
+        "base_rate_per_lakh": 380,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 15,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Family floater — all members under one sum insured",
+            "Maternity and newborn cover from day one",
+            "50% no-claim bonus each claim-free year",
+            "Annual preventive health check-up included",
+            "Cashless treatment at 10,000+ network hospitals",
+        ],
+        "eligibility_summary": "Age 18–65, annual income ≥ ₹2L, family of up to 6 covered",
+        "return_rate": None,
+        "available_terms": [1],
+    },
+    "HLTH002": {
+        "base_rate_per_lakh": 650,
+        "age_bands": _AGE_BANDS_SENIOR,
+        "smoker_loading_pct": 10,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Zero co-payment for all hospitalisation claims",
+            "AYUSH (Ayurveda, Yoga, Unani, Siddha, Homeopathy) cover",
+            "Domiciliary hospitalisation covered",
+            "Pre-existing disease cover after 12-month waiting period",
+            "Designed specifically for senior citizens aged 45–80",
+        ],
+        "eligibility_summary": "Age 45–80, annual income ≥ ₹2L, senior citizens only",
+        "return_rate": None,
+        "available_terms": [1],
+    },
+    "HLTH003": {
+        "base_rate_per_lakh": 320,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Unlimited sum insured restoration after every claim",
+            "Cover up to ₹1 crore for serious illnesses",
+            "Mental health hospitalisation covered",
+            "Teleconsultation with doctors included",
+            "Cashless at 10,000+ hospitals nationwide",
+        ],
+        "eligibility_summary": "Age 18–60, annual income ≥ ₹3L, non-smokers only",
+        "return_rate": None,
+        "available_terms": [1],
+    },
+    "HLTH004": {
+        "base_rate_per_lakh": 750,
+        "age_bands": _AGE_BANDS_SENIOR,
+        "smoker_loading_pct": 12,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Designed exclusively for parents aged 55–75",
+            "No room rent sub-limits on any room category",
+            "Annual preventive health check-up included",
+            "Ambulance cover and organ donor expenses",
+            "Pre-existing disease cover after 4-year waiting period",
+        ],
+        "eligibility_summary": "Age 55–75 (parents/in-laws), annual income ≥ ₹3L",
+        "return_rate": None,
+        "available_terms": [1],
+    },
+    # ── ULIP ───────────────────────────────────────────────────────────────
+    "ULIP001": {
+        "base_rate_per_lakh": 900,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Market-linked growth with equity, debt, and balanced fund options",
+            "Minimum guaranteed death benefit = 10× annual premium",
+            "Free fund switching — move between equity and debt any time",
+            "5-year IRDAI lock-in, partial withdrawals allowed after",
+            "Critical illness rider available",
+        ],
+        "eligibility_summary": "Age 18–55, annual income ≥ ₹5L, non-smokers only",
+        "return_rate": 11.0,
+        "available_terms": [10, 15, 20],
+    },
+    "ULIP002": {
+        "base_rate_per_lakh": 850,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Auto-rebalancing from equity to debt as maturity approaches",
+            "Loyalty additions from the 6th policy year",
+            "Systematic partial withdrawal after 5-year lock-in",
+            "Waiver of premium rider available",
+            "Goal-based fund options aligned to financial milestones",
+        ],
+        "eligibility_summary": "Age 25–60, annual income ≥ ₹6L, non-smokers only",
+        "return_rate": 10.5,
+        "available_terms": [10, 15, 20],
+    },
+    "ULIP003": {
+        "base_rate_per_lakh": 1000,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Zero premium allocation charges — 100% of premium invested",
+            "100% equity fund option for maximum long-term growth",
+            "Ideal for high-income earners with 10+ year horizon",
+            "Life cover throughout the term as regulatory requirement",
+        ],
+        "eligibility_summary": "Age 18–65, annual income ≥ ₹8L, non-smokers only",
+        "return_rate": 12.0,
+        "available_terms": [10, 15, 20],
+    },
+    "ULIP004": {
+        "base_rate_per_lakh": 800,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Automatic premium waiver if parent dies — education fund continues",
+            "Maturity amount paid for child's education at key milestones",
+            "Life cover for the parent throughout the policy term",
+            "Fund options aligned to child's future education goals",
+        ],
+        "eligibility_summary": "Parent aged 18–55, annual income ≥ ₹5L, non-smokers only",
+        "return_rate": 10.0,
+        "available_terms": [10, 15, 20],
+    },
+    # ── Endowment ──────────────────────────────────────────────────────────
+    "ENDT001": {
+        "base_rate_per_lakh": 700,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 20,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Guaranteed maturity benefit — corpus known at policy inception",
+            "Annual bonus additions declared by the company each year",
+            "Accidental death benefit rider available",
+            "Life cover throughout the savings term",
+            "Suitable for conservative savers aged 18–55",
+        ],
+        "eligibility_summary": "Age 18–55, annual income ≥ ₹3L, smokers and non-smokers eligible",
+        "return_rate": 6.5,
+        "available_terms": [10, 15, 20, 25],
+    },
+    "ENDT002": {
+        "base_rate_per_lakh": 650,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 15,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Periodic money-back payouts every 5 years for planned expenses",
+            "Life cover remains intact even after each payout",
+            "Ideal for funding education, home purchase, or medical needs",
+            "Fixed premium throughout the policy term",
+        ],
+        "eligibility_summary": "Age 25–60, annual income ≥ ₹3L, smokers and non-smokers eligible",
+        "return_rate": 6.0,
+        "available_terms": [10, 15, 20, 25],
+    },
+    "ENDT003": {
+        "base_rate_per_lakh": 720,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 18,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Pay premiums for only 10 years — coverage continues for 20 years",
+            "Guaranteed addition of ₹50 per ₹1000 sum assured per year",
+            "Terminal illness benefit — full payout on diagnosis",
+            "Critical illness rider available",
+            "Lower long-term premium commitment",
+        ],
+        "eligibility_summary": "Age 18–65, annual income ≥ ₹4L, smokers and non-smokers eligible",
+        "return_rate": 6.8,
+        "available_terms": [10, 20],
+    },
+    "ENDT004": {
+        "base_rate_per_lakh": 680,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 15,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "100% guaranteed maturity benefit declared at inception",
+            "Non-participating — no bonus variability, fully predictable",
+            "Capital protection priority over high returns",
+            "Ideal for risk-averse savers aged 30–55",
+        ],
+        "eligibility_summary": "Age 30–55, annual income ≥ ₹4L, smokers and non-smokers eligible",
+        "return_rate": 5.5,
+        "available_terms": [10, 15, 20],
+    },
+    # ── Critical Illness ───────────────────────────────────────────────────
+    "CRIT001": {
+        "base_rate_per_lakh": 180,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Lump-sum payout on diagnosis of any of 12 listed cancer types",
+            "Payout independent of hospitalisation — no bills required",
+            "Covers all cancer stages from early to advanced",
+            "Income replacement during cancer treatment and recovery",
+            "Non-smokers only — lower premium, higher eligibility",
+        ],
+        "eligibility_summary": "Age 18–65, annual income ≥ ₹3L, non-smokers only",
+        "return_rate": None,
+        "available_terms": [5, 10, 15, 20],
+    },
+    "CRIT002": {
+        "base_rate_per_lakh": 200,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 35,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Covers heart attack, CABG, heart valve surgery, and stroke",
+            "Smokers and non-smokers both eligible",
+            "Lump-sum paid directly to customer — use as you need",
+            "Supports treatment, recovery, and income replacement",
+        ],
+        "eligibility_summary": "Age 25–60, annual income ≥ ₹3L, smokers and non-smokers eligible",
+        "return_rate": None,
+        "available_terms": [5, 10, 15, 20],
+    },
+    "CRIT003": {
+        "base_rate_per_lakh": 220,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 30,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Widest coverage — 36 major and minor critical illnesses",
+            "Includes cancer, kidney failure, organ transplant, paralysis, blindness",
+            "Free second opinion service with leading specialists",
+            "Income replacement rider available",
+            "Benefit paid on first diagnosis without waiting for survival period",
+        ],
+        "eligibility_summary": "Age 18–70, annual income ≥ ₹3L, smokers and non-smokers eligible",
+        "return_rate": None,
+        "available_terms": [5, 10, 15, 20],
+    },
+    "CRIT004": {
+        "base_rate_per_lakh": 195,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "100% payout on diagnosis of any of 20 serious illnesses",
+            "Additional 50% recovery benefit 12 months after diagnosis",
+            "Dual benefit — financial support at diagnosis AND during recovery",
+            "Covers cancer, stroke, heart failure, and 17 more conditions",
+        ],
+        "eligibility_summary": "Age 30–65, annual income ≥ ₹4L, non-smokers only",
+        "return_rate": None,
+        "available_terms": [5, 10, 15, 20],
+    },
+    # ── Pension ────────────────────────────────────────────────────────────
+    "PENS001": {
+        "base_rate_per_lakh": 600,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 10,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Guaranteed minimum return on accumulated retirement corpus",
+            "Choice of immediate or deferred annuity at vesting",
+            "Tax-free lump sum commutation up to one-third of corpus",
+            "Systematic accumulation during working years",
+        ],
+        "eligibility_summary": "Age 30–65, annual income ≥ ₹4L, smokers and non-smokers eligible",
+        "return_rate": 7.0,
+        "available_terms": [10, 15, 20, 30],
+    },
+    "PENS002": {
+        "base_rate_per_lakh": 550,
+        "age_bands": _AGE_BANDS_SENIOR,
+        "smoker_loading_pct": 10,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Guaranteed lifetime income — pension starts next month after purchase",
+            "Joint life option — income continues for surviving spouse",
+            "Multiple annuity variants to choose from",
+            "Return of purchase price variant available",
+        ],
+        "eligibility_summary": "Age 40–75, annual income ≥ ₹5L, smokers and non-smokers eligible",
+        "return_rate": 6.5,
+        "available_terms": [10, 15, 20],
+    },
+    "PENS003": {
+        "base_rate_per_lakh": 700,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Market-linked accumulation — equity growth during working years",
+            "Guaranteed annuity locked in at vesting — no market risk in retirement",
+            "Life cover of at least 10× annual premium throughout term",
+            "Accidental death benefit rider available",
+        ],
+        "eligibility_summary": "Age 25–60, annual income ≥ ₹5L, non-smokers only",
+        "return_rate": 9.0,
+        "available_terms": [10, 15, 20],
+    },
+    "PENS004": {
+        "base_rate_per_lakh": 580,
+        "age_bands": _AGE_BANDS_STD,
+        "smoker_loading_pct": 10,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Fully guaranteed vesting benefit — zero market risk",
+            "Loan facility available after 3 policy years",
+            "Partial surrender option after 5 policy years",
+            "Ideal for risk-averse savers approaching retirement",
+        ],
+        "eligibility_summary": "Age 35–65, annual income ≥ ₹5L, smokers and non-smokers eligible",
+        "return_rate": 6.0,
+        "available_terms": [10, 15, 20, 30],
+    },
+    # ── Child Plan ─────────────────────────────────────────────────────────
+    "CHLD001": {
+        "base_rate_per_lakh": 650,
+        "age_bands": _AGE_BANDS_YOUNG,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Education fund payouts at child's age 18, 21, and 25",
+            "All future premiums waived if parent dies — fund continues uninterrupted",
+            "Guaranteed corpus regardless of parent's survival",
+            "Premium waiver rider built in",
+        ],
+        "eligibility_summary": "Parent aged 18–45, annual income ≥ ₹4L, non-smokers only",
+        "return_rate": 7.5,
+        "available_terms": [10, 15, 18],
+    },
+    "CHLD002": {
+        "base_rate_per_lakh": 620,
+        "age_bands": _AGE_BANDS_YOUNG,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Annual bonus additions build corpus automatically each year",
+            "Entire maturity amount paid when child turns 18",
+            "Guaranteed addition of ₹40 per ₹1000 SA per year",
+            "Life cover for parent throughout the term",
+        ],
+        "eligibility_summary": "Parent aged 20–50, annual income ≥ ₹4L, non-smokers only",
+        "return_rate": 7.0,
+        "available_terms": [10, 15, 18],
+    },
+    "CHLD003": {
+        "base_rate_per_lakh": 680,
+        "age_bands": _AGE_BANDS_YOUNG,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Milestone payouts at child's age 13, 16, and 18 for education expenses",
+            "Market-linked growth during accumulation with ULIP fund options",
+            "Automatic premium waiver on parent's death or disability",
+            "Loyalty additions from year 5 onwards",
+        ],
+        "eligibility_summary": "Parent aged 18–50, annual income ≥ ₹5L, non-smokers only",
+        "return_rate": 8.5,
+        "available_terms": [10, 13, 18],
+    },
+    "CHLD004": {
+        "base_rate_per_lakh": 600,
+        "age_bands": _AGE_BANDS_YOUNG,
+        "smoker_loading_pct": 0,
+        "frequency_multipliers": _FREQ_STD,
+        "benefits": [
+            "Guaranteed savings plan with no market risk for child's education",
+            "Fixed maturity benefit declared at policy inception",
+            "Limited premium payment — pay for 5 years, corpus grows for 15",
+            "Death benefit ensures child receives full sum assured immediately",
+        ],
+        "eligibility_summary": "Parent aged 18–45, annual income ≥ ₹4L, non-smokers only",
+        "return_rate": 6.5,
+        "available_terms": [10, 15],
+    },
+}
+
+# Merge simulation data into the catalog.
+# Products not listed in SIMULATION_DATA get sensible defaults so the
+# simulate_premium function never crashes on a missing key.
+_SIM_DEFAULTS = {
+    "base_rate_per_lakh": 500,
+    "age_bands": _AGE_BANDS_STD,
+    "smoker_loading_pct": 20,
+    "frequency_multipliers": _FREQ_STD,
+    "benefits": [],
+    "eligibility_summary": "See product description for full eligibility details.",
+    "return_rate": None,
+    "available_terms": [10, 15, 20],
+}
+
+for _p in ALL_PRODUCTS:
+    _sim = SIMULATION_DATA.get(_p["id"], {})
+    for _k, _default in _SIM_DEFAULTS.items():
+        _p[_k] = _sim.get(_k, _default)
+
+
 EXPECTED_COUNT = 28
 EXPECTED_PRODUCT_TYPES = {
     "term_life", "health", "ulip", "endowment",

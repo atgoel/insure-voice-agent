@@ -132,6 +132,45 @@ Phase 8  (E2E validation)  → requires all prior phases complete
 
 ---
 
+## Phase 9 — Product Deep-Dive Pitch & Premium Simulation (P2: Stories 5 & 6)
+
+**Goal**: Add two customer-facing features — (1) a full structured product pitch when the customer asks for details, and (2) a deterministic premium simulation service that lets the customer adjust cover and instantly see premium and return projections.
+
+### Story 5 — Product Deep-Dive Pitch
+
+- [x] TASK-085 · [feat] · Add Story 5 + Story 6 acceptance scenarios and expanded out-of-scope section to `specs/005-multi-agent-orchestration/spec.md` — `specs/005-multi-agent-orchestration/spec.md`
+- [x] TASK-086 · [feat] · Add `channel: str` field to `/invoke` request body in `agent_builder/main.py`; default `"voice"`; inject `[CHANNEL: text — full structured detail permitted]` suffix into synthetic profile message when `channel="text"`; return `channel` in response payload — `agent_builder/main.py`
+- [x] TASK-087 · [feat] · Update `agent_builder/sub_agent3_explainer_prompt.md` to handle pitch mode: when customer asks for details on a specific product, deliver eligibility prerequisites + key features + comparison delta vs. other top-3; enforce ≤120-word limit if channel=voice, no limit if channel=text — `agent_builder/sub_agent3_explainer_prompt.md`
+- [x] TASK-088 · [feat] · Update `agent_builder/root_agent_prompt.md` to recognise pitch-intent utterances (e.g. "tell me more about that one", "explain the second plan") and route to `recommend_and_explain` with the specific product context; confirm returns are from `return_rate` catalog field only — `agent_builder/root_agent_prompt.md`
+- [x] TASK-089 · [test] · Add test cases to `tests/test_voice_explanation.py`: (a) pitch response for savings product contains return_rate mention, (b) pitch response for term_life states "pure protection — no maturity value", (c) text-channel pitch is not truncated to 120 words, (d) pitch highlights one unique differentiating feature not present in other top-3 — `tests/test_voice_explanation.py`
+
+### Story 6 — Premium Simulation
+
+- [x] TASK-090 · [feat] · Add simulation fields (`base_rate_per_lakh`, `age_bands`, `smoker_loading_pct`, `frequency_multipliers`, `benefits`, `eligibility_summary`, `return_rate`, `available_terms`) to all 28 products in `data/generate_products.py` via `SIMULATION_DATA` dict + merge loop; regenerate `data/insurance_products.json` — `data/generate_products.py`, `data/insurance_products.json`
+- [x] TASK-091 · [feat] · Create `functions/simulate_premium/main.py` — `@functions_framework.http` Cloud Function; deterministic formula: base_rate → age_loading → smoker_loading → frequency_discount → period_premium; FV annuity formula for savings products; HTTP 400 on validation errors — `functions/simulate_premium/main.py`
+- [x] TASK-092 · [feat] · Create `functions/simulate_premium/requirements.txt` — `functions-framework==3.*` — `functions/simulate_premium/requirements.txt`
+- [x] TASK-093 · [infra] · Add `simulate_premium` Cloud Function deploy step to `infra/cloudbuild.yaml`; inject `PRODUCTS_JSON_PATH` env var pointing to the mounted catalog — `infra/cloudbuild.yaml`
+- [x] TASK-094 · [feat] · Add `POST /simulate` endpoint to `agent_builder/main.py` that proxies to `SIMULATE_PREMIUM_URL` env var; returns simulation result directly (no LLM involved); add `SIMULATE_PREMIUM_URL` to env var list in Dockerfile and cloudbuild — `agent_builder/main.py`
+- [x] TASK-095 · [feat] · Register `simulate_premium` as a `FunctionTool` in `agent_builder/agent_definition.py` so the LLM can call it during a voice turn to narrate simulation results (Story 6 AC 8) — `agent_builder/agent_definition.py`
+- [x] TASK-096 · [test] · Create `tests/test_simulate_premium.py`: (a) monthly/annual frequency multipliers, (b) age_band loading, (c) smoker loading, (d) ULIP/endowment/pension return projection, (e) term_life/health/CI returns are null, (f) invalid product_id → 400, (g) sum_assured below minimum → 400, (h) smoker on non-smoker product → 400 — `tests/test_simulate_premium.py`
+- [x] TASK-097 · [feat] · Update `frontend/simulation.js` to add a simulation panel: product selector dropdown + sum_assured/frequency/term sliders; on change, call `POST /simulate` directly; render `period_premium`, `total_premium_outflow`, and (if savings) `projected_maturity_value` in a card below recommendations — `frontend/simulation.js`, `frontend/index.html`, `frontend/style.css`
+
+### Cloud Build Wiring
+
+- [x] TASK-100 · [infra] · In `infra/cloudbuild.yaml` `simulate_premium` deploy step: after function deploy, capture the Cloud Function URL via `gcloud functions describe simulate_premium --format='value(serviceConfig.uri)'` → write to `/workspace/simulate_url.txt`; read it in the agent Cloud Run deploy step and pass as `--set-env-vars=SIMULATE_PREMIUM_URL=<captured-url>` (mirrors the `mcp_native_url.txt` pattern already used for `elastic-mcp-server-native`) — `infra/cloudbuild.yaml`
+
+### Frontend URL Routing
+
+- [x] TASK-101 · [feat] · Add `<meta name="simulate-url" content="">` to `frontend/index.html` (empty = same-origin, production relative path; set full URL for local-dev cross-origin testing); read it in `frontend/simulation.js` alongside the existing `invoke-url` meta-tag pattern — `frontend/index.html`, `frontend/simulation.js`
+
+### Documentation
+
+- [x] TASK-098 · [docs] · Close Open Question #2 in `specs/005-multi-agent-orchestration/plan.md` — `_write_audit_log()` + `_tool_results` event-stream capture already fully implemented in `main.py`; mark resolved — `specs/005-multi-agent-orchestration/plan.md`
+- [x] TASK-099 · [docs] · Archive dead legacy file `agent_builder/sub_agent1_search_prompt.md` → rename to `sub_agent1_search_prompt.legacy.md` (search now via MCPToolset, not sub-agent) — `agent_builder/`
+- [x] TASK-102 · [docs] · Update `specs/005-multi-agent-orchestration/plan.md` with Phase 2 implementation plan section: architecture diagrams for pitch mode + simulation data flows, file structure changes, constitution check, design decisions table, new latency budget rows, open questions (SIMULATE_PREMIUM_URL capture, frontend simulate-url meta tag, pitch-mode product identification from session) — `specs/005-multi-agent-orchestration/plan.md`
+
+---
+
 ## Task Summary
 
 | Phase | Total | Done | Remaining |
@@ -144,4 +183,9 @@ Phase 8  (E2E validation)  → requires all prior phases complete
 | Phase 6 — Audit Trail | 4 | 4 | 0 |
 | Phase 7 — Production Hardening | 6 | 5 | 1 (TASK-074 future) |
 | Phase 8 — E2E Validation | 3 | 3 | 0 |
-| **Total** | **46** | **45** | **1** |
+| Phase 9 — Pitch & Simulation (P2) | 18 | **18** | **0** |
+| **Total** | **64** | **64** | **0** |
+
+### Phase 9 Completed (all done)
+
+All 9 remaining Phase 9 tasks completed. See task entries above (all marked `[x]`).

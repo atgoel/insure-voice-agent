@@ -23,6 +23,10 @@ class VoiceSimulationEngine {
         // Set meta content to absolute URL for local-dev testing against a remote /invoke.
         const meta = document.querySelector('meta[name="invoke-url"]');
         this.invokeUrl = (meta && meta.content) ? meta.content : '';
+
+        // Simulation endpoint — reads simulate-url meta tag; falls back to same-origin /simulate.
+        const simMeta = document.querySelector('meta[name="simulate-url"]');
+        this.simulateUrl = (simMeta && simMeta.content) ? simMeta.content : '/simulate';
         this.invokeSessionId = null;       // null until first /invoke response
         this.hasUserSpokenOnce = false;
         this.sessionEnded = false;
@@ -274,12 +278,18 @@ class VoiceSimulationEngine {
         this.currentUtterance = utterance;
 
         const voices = this.synth.getVoices();
-        const preferredVoice = voices.find(v => v.lang.toLowerCase() === 'en-in' && v.name.toLowerCase().includes('female'));
+        // Priority: en-IN female > en-IN any > en-GB female > en-US female
+        const preferredVoice =
+            voices.find(v => v.lang.toLowerCase() === 'en-in' && v.name.toLowerCase().includes('female')) ||
+            voices.find(v => v.lang.toLowerCase() === 'en-in') ||
+            voices.find(v => v.lang.toLowerCase().startsWith('en-gb') && v.name.toLowerCase().includes('female')) ||
+            voices.find(v => v.lang.toLowerCase().startsWith('en-us') && v.name.toLowerCase().includes('female'));
         if (preferredVoice) {
             utterance.voice = preferredVoice;
+            console.log(`[TTS] Selected voice: ${preferredVoice.name} (${preferredVoice.lang})`);
         }
-        utterance.rate = 1.0;
-        utterance.pitch = 1.05;
+        utterance.rate = 1.15;   // 1.0 was too slow/slurred; 1.15 is crisp and natural
+        utterance.pitch = 1.08;
 
         let speechStarted = false;
         let speechCompleted = false;
@@ -430,3 +440,156 @@ try {
     console.error("Critical error constructing VoiceSimulationEngine:", err);
     window.logDebug("[Critical Error] Failed to start voice engine: " + err.message, "error");
 }
+
+// ==========================================================================
+// STORY 6 — Premium Simulation Panel (deterministic, no LLM)
+// ==========================================================================
+
+(function initSimulationPanel() {
+    // DOM references — all guarded so absence of elements never throws.
+    const screen       = document.getElementById('simulation-screen');
+    const btnOpen      = document.getElementById('btn-open-sim');
+    const btnClose     = document.getElementById('btn-close-sim');
+    const productSel   = document.getElementById('sim-product-select');
+    const sumSlider    = document.getElementById('sim-sum-assured');
+    const sumLabel     = document.getElementById('sim-sum-label');
+    const freqSel      = document.getElementById('sim-frequency');
+    const termSel      = document.getElementById('sim-policy-term');
+    const resultsCard  = document.getElementById('sim-results-card');
+    const errMsg       = document.getElementById('sim-error-msg');
+    const loadingEl    = document.getElementById('sim-loading');
+
+    const resPeriod    = document.getElementById('sim-res-period');
+    const resAnnual    = document.getElementById('sim-res-annual');
+    const resTotal     = document.getElementById('sim-res-total');
+    const resMaturity  = document.getElementById('sim-res-maturity');
+    const resGain      = document.getElementById('sim-res-gain');
+    const resMatRow    = document.getElementById('sim-res-maturity-row');
+    const resGainRow   = document.getElementById('sim-res-gain-row');
+
+    if (!screen || !btnOpen) return; // Panel not present in DOM — skip
+
+    // Retrieve SIMULATE_URL from the engine instance (set during constructor from meta tag).
+    function getSimulateUrl() {
+        try {
+            return (window.voiceEngine && window.voiceEngine.simulateUrl) ? window.voiceEngine.simulateUrl : '/simulate';
+        } catch (_) { return '/simulate'; }
+    }
+
+    // Expose a method so app.js can populate the product selector after a recommendation turn.
+    window.populateSimProductSelector = function(top3Products) {
+        if (!productSel || !Array.isArray(top3Products)) return;
+        // Clear existing dynamic options (keep the placeholder)
+        while (productSel.options.length > 1) productSel.remove(1);
+        top3Products.forEach((p, i) => {
+            const name = p.name || p.product_name || `Plan ${i + 1}`;
+            const pid  = p.product_id || p.id || '';
+            const opt  = new Option(`${i + 1}. ${name}`, pid);
+            opt.dataset.productType = p.product_type || '';
+            productSel.appendChild(opt);
+        });
+        // Show the open button now that we have products
+        if (btnOpen) btnOpen.style.display = 'flex';
+    };
+
+    // Format INR amounts compactly (₹5.0L, ₹1.2Cr, etc.)
+    function fmtINR(val) {
+        if (val == null || isNaN(val)) return '—';
+        const n = Number(val);
+        if (n >= 10000000) return `₹${(n / 10000000).toFixed(2)}Cr`;
+        if (n >= 100000)   return `₹${(n / 100000).toFixed(2)}L`;
+        return `₹${n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+    }
+
+    // Update sum assured label as slider moves
+    function updateSumLabel() {
+        if (sumLabel && sumSlider) sumLabel.textContent = fmtINR(Number(sumSlider.value));
+    }
+
+    // Show/hide loading and result panels
+    function setLoading(visible) {
+        if (loadingEl)  loadingEl.style.display  = visible ? 'flex'  : 'none';
+        if (resultsCard) resultsCard.style.display = visible ? 'none'  : 'none'; // keep hidden until results
+        if (errMsg)      errMsg.style.display      = 'none';
+    }
+
+    function showError(msg) {
+        if (errMsg) { errMsg.textContent = msg; errMsg.style.display = 'block'; }
+        if (resultsCard) resultsCard.style.display = 'none';
+        if (loadingEl)   loadingEl.style.display   = 'none';
+    }
+
+    function showResults(data) {
+        if (!resultsCard) return;
+        if (resPeriod)  resPeriod.textContent  = fmtINR(data.period_premium);
+        if (resAnnual)  resAnnual.textContent   = fmtINR(data.annual_premium);
+        if (resTotal)   resTotal.textContent    = fmtINR(data.total_premium_outflow);
+
+        const hasMat = data.projected_maturity_value != null;
+        if (resMatRow) resMatRow.style.display = hasMat ? '' : 'none';
+        if (resGainRow) resGainRow.style.display = hasMat ? '' : 'none';
+        if (hasMat) {
+            if (resMaturity) resMaturity.textContent = fmtINR(data.projected_maturity_value);
+            if (resGain)     resGain.textContent     = fmtINR(data.net_gain);
+        }
+
+        resultsCard.style.display = 'flex';
+        if (errMsg)    errMsg.style.display    = 'none';
+        if (loadingEl) loadingEl.style.display = 'none';
+    }
+
+    // Core simulation call
+    async function fetchSimulation() {
+        const productId = productSel && productSel.value;
+        if (!productId) return; // No product selected yet — don't call
+
+        const payload = {
+            product_id:        productId,
+            sum_assured:       parseInt(sumSlider ? sumSlider.value : 5000000, 10),
+            customer_age:      30,   // Default — overridden by profile if available
+            is_smoker:         false, // Default — overridden by profile if available
+            premium_frequency: freqSel ? freqSel.value : 'monthly',
+            policy_term:       parseInt(termSel ? termSel.value : 15, 10),
+        };
+
+        // Inject actual customer profile fields if intake data is available on the engine
+        try {
+            const profile = window.voiceEngine && window.voiceEngine.latestCustomerProfile;
+            if (profile) {
+                if (profile.age)     payload.customer_age = profile.age;
+                if (profile.smoker !== undefined) payload.is_smoker = profile.smoker;
+            }
+        } catch (_) {}
+
+        setLoading(true);
+        try {
+            const resp = await fetch(getSimulateUrl(), {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const detail = await resp.json().catch(() => ({}));
+                showError(`Simulation error: ${detail.detail || resp.statusText}`);
+                return;
+            }
+            const data = await resp.json();
+            if (data.error) { showError(data.error); return; }
+            showResults(data);
+        } catch (err) {
+            showError(`Network error: ${err.message}`);
+        }
+    }
+
+    // Wire events
+    if (btnOpen)  btnOpen.addEventListener('click', () => { screen.style.display = 'flex'; });
+    if (btnClose) btnClose.addEventListener('click', () => { screen.style.display = 'none'; });
+    if (sumSlider) {
+        sumSlider.addEventListener('input',  () => { updateSumLabel(); fetchSimulation(); });
+        updateSumLabel();
+    }
+    if (freqSel)     freqSel.addEventListener('change',   fetchSimulation);
+    if (termSel)     termSel.addEventListener('change',   fetchSimulation);
+    if (productSel)  productSel.addEventListener('change', fetchSimulation);
+
+})();

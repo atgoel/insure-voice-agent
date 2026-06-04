@@ -225,11 +225,46 @@ After delivering recommendations, the agent maintains context for follow-up ques
 
 ---
 
+### Story 5 — Product Deep-Dive Pitch (Priority: P2)
+
+When a customer expresses interest in a specific recommended product, the system delivers a full structured pitch covering prerequisites, features, and a comparison against the other ranked options.
+
+**Acceptance Scenarios**:
+
+1. **Given** recommendations have been delivered and the customer says "tell me more about that one", "explain this plan", or asks about eligibility/returns for a named product, **When** the agent responds, **Then** it returns: (a) eligibility prerequisites from compliance rules, (b) key features from product catalog fields only — no LLM fabrication, (c) suitability score delta vs. the other top-3 products.
+2. **Given** `channel=voice`, **When** pitch is delivered, **Then** response is ≤ 120 words (voice comfort budget).
+3. **Given** `channel=text`, **When** pitch is delivered, **Then** full structured output is permitted without the 120-word limit.
+4. **Given** product type is `endowment`, `ulip`, or `pension` AND product data contains a `return_rate` field, **When** pitch includes projected returns, **Then** the return figure is sourced from the product catalog only — never LLM-inferred (§II).
+5. **Given** product type is `term_life`, `health`, or `critical_illness`, **When** the customer asks about returns, **Then** the agent clearly states this is a pure protection plan with no maturity value.
+6. **Given** any pitch response, **When** reviewed for unique features, **Then** it highlights one distinguishing trait from the product's `key_feature` or `tags` that differentiates it from the other top-3 options.
+
+---
+
+### Story 6 — Premium Simulation (Priority: P2)
+
+An interactive simulation lets the customer (or sales demo) change sum_assured, premium_frequency, and policy_term and immediately see the impact on premiums and projected returns — without re-running the full agent pipeline.
+
+**Acceptance Scenarios**:
+
+1. **Given** a `POST /simulate` request with `product_id`, `sum_assured`, `customer_age`, `is_smoker`, `premium_frequency`, and `policy_term`, **When** processed, **Then** the `simulate_premium` Cloud Function returns: `period_premium`, `annual_premium`, `total_premium_outflow`, and (for savings products) `projected_maturity_value` and `net_gain`.
+2. **Given** `premium_frequency` changes (monthly → annual), **When** simulation runs, **Then** the annual frequency discount is applied deterministically from the product's `frequency_multipliers` table — no LLM involved (§II).
+3. **Given** `sum_assured` changes, **When** simulation runs, **Then** premium scales proportionally from `base_rate_per_lakh` with age and smoker loadings applied on top.
+4. **Given** product type is `term_life`, `health`, or `critical_illness`, **When** simulation runs, **Then** `projected_maturity_value` and `net_gain` are `null` — these are protection-only products.
+5. **Given** product type is `endowment`, `ulip`, or `pension`, **When** simulation runs, **Then** `projected_maturity_value` is calculated using the product's `return_rate` field via the standard compound accumulation formula — no LLM, no approximation.
+6. **Given** invalid inputs (sum_assured below product minimum, age outside product range, unsupported frequency), **When** simulation runs, **Then** the function returns a structured `validation_errors` list, HTTP 400, and does not attempt a calculation.
+7. **Given** the simulation panel in the frontend, **When** the customer adjusts sliders or dropdowns, **Then** `/simulate` is called directly — the full agent `/invoke` pipeline is NOT re-triggered.
+8. **Given** `channel=voice`, **When** the agent narrates a simulation result, **Then** it calls the `simulate_premium` FunctionTool and reads the `period_premium` and `projected_maturity_value` from the response — not from Gemini inference.
+
+---
+
 ## Edge Cases
 
 - All products rejected → handled per Story 2 above.
 - Total latency exceeds 8s → log a warning; no user-facing impact (response still delivered).
 - Session timeout mid-conversation → new session starts fresh.
+- Simulation with sum_assured = 0 or negative → rejected with validation error (Story 6 AC 6).
+- Deep-dive pitch requested before any recommendation has been delivered → agent re-prompts for profile.
+- Product return_rate missing for a savings product → omit projected return figure; do not fabricate (§II).
 
 ---
 
@@ -238,6 +273,10 @@ After delivering recommendations, the agent maintains context for follow-up ques
 - Phase 2: Trigger downstream application workflow (Pub/Sub → Camunda).
 - Parallel tool execution (all calls are sequential).
 - Multi-customer session handling.
+- Claim processing, premium payment transactions, or actual policy issuance.
+- IRDAI portal integration or regulatory filing.
+- Agent licensing compliance verification.
+- Actual market-rate or live fund NAV lookup for ULIP returns (return_rate is a fixed catalog field).
 
 ---
 
