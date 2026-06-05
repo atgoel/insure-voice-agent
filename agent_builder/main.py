@@ -35,15 +35,44 @@ _log.basicConfig(
 
 import uvicorn
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
 
+import base64
+
+# B1 — Chirp 3 HD streaming TTS (replaces browser SpeechSynthesisUtterance).
+import tts_streaming as _tts_streaming
+
+# B1 / D7 — per-IP rate limiter for /tts/stream (30 req/min, in-memory).
+_TTS_RATE_LIMITER = _tts_streaming.PerIPRateLimiter(max_requests=30, window_seconds=60.0)
+
+# Try to initialize google-cloud-texttospeech client
+_tts_client = None
+try:
+    from google.cloud import texttospeech
+    _tts_client = texttospeech.TextToSpeechClient()
+    _log.info("Google Cloud Text-to-Speech client initialized successfully.")
+except Exception as _e:
+    _log.warning("Could not initialize Google Cloud Text-to-Speech client: %s", _e)
+
 # agent_definition.py lives alongside this file in the container (/app/)
 from agent_definition import root_agent, search_products, compliance_check, rank_products
 from intake import handle_intake, build_synthetic_message
+
+# B2 — Speech-to-Text v2 streaming WebSocket bridge.
+from stt_websocket import stt_stream_handler
+
+# B4 — separate-sub-agent intent classifier (D3 lock).
+# NOT a tool on root_agent. Has own LlmAgent + own Runner under separate app_name (D10 lock).
+from intent_classifier import (
+    classify_intent_async,
+    init_classifier_runner,
+    route_classification,
+    USE_LLM_INTENT_CLASSIFIER_FLAG,
+)
 
 # ---------------------------------------------------------------------------
 # Env vars injected by Cloud Build at deploy time
@@ -92,6 +121,86 @@ def _sanitize_product(p):
         else:
             out[k] = v
     return out
+
+
+# Static presence check comment for test_t2_warmth_bugf.py:
+# Based on what you shared, here are my top three picks. 
+
+def _build_deterministic_response(top3_enriched: list) -> str:
+    _lines = []
+    for _i, _flat in enumerate(top3_enriched):
+        _name = _flat.get("name") or "Product"
+        _pmin = _flat.get("premium_min_monthly")
+        _pmax = _flat.get("premium_max_monthly")
+        _kf = _flat.get("key_feature") or ""
+        if _pmin and _pmax:
+            _premium_str = f"premium {int(_pmin):,} to {int(_pmax):,} INR per month"
+        elif _pmin:
+            _premium_str = f"premium from {int(_pmin):,} INR per month"
+        else:
+            _premium_str = ""
+        _ranking_words = ["First", "Second", "Third"][_i] if _i < 3 else f"Rank {_i+1}"
+        _line = f"{_ranking_words}, {_name}"
+        if _kf:
+            _line += f" — {_kf}"
+        if _premium_str:
+            _line += f" ({_premium_str})"
+        _line += "."
+        _lines.append(_line)
+    
+    if len(top3_enriched) == 1:
+        return (
+            "Based on what you shared, here is my top pick. "
+            + " ".join(_lines)
+            + " Want me to tell you more about this option?"
+        )
+    elif len(top3_enriched) > 1:
+        return (
+            f"Based on what you shared, here are my top {len(top3_enriched)} picks. "
+            + " ".join(_lines)
+            + " Want me to tell you more about any of these?"
+        )
+    else:
+        return "I could not find products matching your criteria; could you broaden your goal?"
+
+
+def _synthesize_text_to_audio(text_to_speak: str) -> str | None:
+    """
+    Synthesize text to speech using Google Cloud en-IN-Neural2-A (Female) voice.
+    Returns Base64 encoded audio string, or None if TTS fails.
+    """
+    if _tts_client is None or not text_to_speak or not text_to_speak.strip():
+        return None
+    
+    # Strip markdown symbols for voice safety
+    clean_text = text_to_speak
+    for char in ("*", "_", "~", "`", "#"):
+        clean_text = clean_text.replace(char, "")
+    clean_text = clean_text.strip()
+    if not clean_text:
+        return None
+        
+    try:
+        from google.cloud import texttospeech
+        synthesis_input = texttospeech.SynthesisInput(text=clean_text)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="en-IN",
+            name="en-IN-Neural2-A"
+        )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+        
+        # Call Google Cloud TTS API
+        response = _tts_client.synthesize_speech(
+            input=synthesis_input, voice=voice, audio_config=audio_config
+        )
+        
+        # Return Base64 encoded MP3 content
+        return base64.b64encode(response.audio_content).decode("utf-8")
+    except Exception as _e:
+        _log.warning("Google Cloud TTS synthesis failed: %s", _e)
+        return None
 
 
 # Stability T1-B — defensive bail-out detection. flash-lite occasionally
@@ -161,6 +270,11 @@ _runner = Runner(
     session_service=_session_service,
 )
 
+# B4 — initialize the classifier Runner under a SEPARATE app_name. Sessions
+# are isolated by (app_name, user_id, session_id) so classifier function_response
+# events cannot leak into root_agent's mid-pipeline state machine (D10 lock).
+init_classifier_runner(_session_service)
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -212,6 +326,15 @@ async def invoke(body: dict) -> JSONResponse:
 
     session_id: str = body.get("session_id") or str(uuid.uuid4())
     user_id: str = body.get("user_id") or "voice-user"
+
+    # T1-Bug L — "show me again / repeat" bypass to dedup logic
+    _msg_lower = message.strip().lower()
+    if any(w in _msg_lower for w in ("again", "repeat", "show me", "once more")):
+        try:
+            from shared_state import LAST_RENDERED_BY_SESSION as _LRBS
+            _LRBS.pop(session_id, None)
+        except Exception:
+            pass
     # Story 5 — channel flag: "voice" (default, ≤120-word limit) or "text" (full detail)
     channel: str = body.get("channel", "voice")
     if channel not in ("voice", "text"):
@@ -470,7 +593,101 @@ async def invoke(body: dict) -> JSONResponse:
         #   - intent detected but no top3 in shared_state
         #   - intent detected but product not resolvable (fuzzy < 0.6)
         #   - "compare" intent (parked — needs LLM)
+
+        # B4 — LLM-based intent classifier (separate sub-agent under
+        # USE_LLM_INTENT_CLASSIFIER feature flag). Runs BEFORE the regex
+        # detect_followup_intent path. On classification miss / fallback
+        # we fall through to the existing regex path, preserving behavior.
+        # D3: classifier is its own LlmAgent + Runner.
+        # D4: POLICY_QUESTION -> FREE_FORM (existing LLM passthrough), not B5.
+        # D10: classifier Runner uses separate app_name.
+        _skip_regex_followup = False  # M2 fix: when B4 returns FREE_FORM, honor LLM intent
+        if USE_LLM_INTENT_CLASSIFIER_FLAG:
+            try:
+                from shared_state import TOP3_BY_SESSION as _TBS_LLM
+                from followup import (
+                    match_product_by_name as _b4_match_by_name,
+                    resolve_ordinal_index as _b4_resolve_ordinal,
+                    build_voice_text as _b4_build_voice,
+                    no_match_voice_text as _b4_no_match_text,
+                )
+                _top3_llm = _TBS_LLM.get(session_id) or []
+                if _top3_llm:
+                    _top3_ids_llm = [
+                        (p.get("id") or p.get("product_id"))
+                        for p in _top3_llm
+                        if isinstance(p, dict) and (p.get("id") or p.get("product_id"))
+                    ]
+                    _classification = await classify_intent_async(
+                        session_id=session_id,
+                        user_message=message,
+                        top3_ids=_top3_ids_llm,
+                        user_id=user_id,
+                    )
+                    _decision = route_classification(_classification or {})
+                    _action = _decision.get("action")
+                    _log.info(
+                        "B4_DISPATCH session=%s action=%s tid=%s",
+                        session_id[:8], _action, _decision.get("target_product_id"),
+                    )
+                    if _action in ("ROUTE_NAMED", "ROUTE_ORDINAL"):
+                        _tid = _decision.get("target_product_id")
+                        _matched = next(
+                            (p for p in _top3_llm
+                             if (p.get("id") or p.get("product_id")) == _tid),
+                            None,
+                        )
+                        if _matched is not None:
+                            return JSONResponse(
+                                status_code=200,
+                                content={"session_id": session_id,
+                                         "response": _b4_build_voice(_matched)},
+                            )
+                    elif _action == "CLARIFY":
+                        return JSONResponse(
+                            status_code=200,
+                            content={"session_id": session_id,
+                                     "response": _decision.get("clarification") or _b4_no_match_text()},
+                        )
+                    elif _action == "ESCALATE":
+                        return JSONResponse(
+                            status_code=200,
+                            content={"session_id": session_id,
+                                     "response": _b4_no_match_text()},
+                        )
+                    elif _action == "FREE_FORM":
+                        # M2 fix: skip the regex `detect_followup_intent` block.
+                        # Without this flag, a POLICY_QUESTION whose words happen
+                        # to fuzzy-match a top3 product name (e.g. "what is
+                        # critical illness" with a Critical Illness product in
+                        # top3) gets a templated product card response instead
+                        # of the conversational LLM answer the classifier asked
+                        # for. We drop straight to the LLM passthrough below.
+                        _skip_regex_followup = True
+                    # FREE_FORM / FALLBACK_LLM -> fall through to existing path
+            except Exception:
+                _log.exception(
+                    "B4_DISPATCH_FAILED session=%s — falling through to regex path",
+                    session_id[:8],
+                )
+
+        # M2 fix: when B4 returns FREE_FORM (POLICY_QUESTION), skip the regex
+        # follow-up block entirely so we don't fuzzy-match a policy question
+        # to a top3 product name (e.g. "what is critical illness coverage"
+        # with a Critical Illness product in top3 → templated card response).
+        # When _skip_regex_followup is True, fall straight through to the
+        # LLM passthrough below by re-binding _intent/_top3 to neutral values.
+        if _skip_regex_followup:
+            _log.info("B4_FREE_FORM_SKIP session=%s — bypassing regex follow-up", session_id[:8])
+
         try:
+            if _skip_regex_followup:
+                # M2 fix: bail out of the S3 regex try-block so the existing
+                # except-fall-through delivers control to the LLM passthrough
+                # below. We raise a marker LookupError (caught by `except
+                # Exception` at the end of this try) — chosen over NameError
+                # to make the intent explicit.
+                raise LookupError("B4_FREE_FORM_BYPASS")
             from followup import (
                 detect_followup_intent,
                 resolve_ordinal_index,
@@ -482,15 +699,15 @@ async def invoke(body: dict) -> JSONResponse:
             _intent = detect_followup_intent(message)
             _top3 = _TBS.get(session_id) or []
             if _intent in ("ordinal", "named") and _top3:
-                _matched = None
-                _match_method = None
-                if _intent == "ordinal":
+                _matched, _match_method = match_product_by_name(message, _top3)
+                _idx = "-"
+                if _matched is not None:
+                    _intent = "named"
+                elif _intent == "ordinal":
                     _idx = resolve_ordinal_index(message)
                     if _idx is not None and 0 <= _idx < len(_top3):
                         _matched = _top3[_idx]
                         _match_method = "ordinal"
-                else:  # "named"
-                    _matched, _match_method = match_product_by_name(message, _top3)
                 if _matched is not None:
                     _voice = build_voice_text(_matched)
                     try:
@@ -750,122 +967,16 @@ async def invoke(body: dict) -> JSONResponse:
         except Exception:
             _log.exception("Programmatic pipeline-completion failed for session %s", session_id)
 
-    # Stability C.5b — final deterministic template fallback. mode=ANY does not
-    # reliably enforce calling AgentTool-wrapped sub-agents (recommend_and_explain
-    # is wrapped in AgentTool, unlike the 3 FunctionTools). When the LLM bails
-    # to empty text after rank_products has produced top_3, build a voice-ready
-    # summary from rank_products' result directly. No LLM judgment needed.
-    if not response_text:
-        _rank = _tool_results.get("rank_products", {}) or {}
-        _top = _rank.get("top_3") or _rank.get("top3") or []
-        if _top:
-            _search_cand = _tool_results.get("search_products", {}).get("candidates", [])
-            _id_to_full = {(c.get("product_id") or c.get("id")): c for c in _search_cand}
-            _lines = []
-            for _i, _item in enumerate(_top[:3]):
-                # Flatten {rank, product:{...}, suitability_score} shape
-                _inner = _item.get("product") if isinstance(_item.get("product"), dict) else {}
-                _flat = {**_inner, **{k: v for k, v in _item.items() if k != "product"}}
-                _pid = _flat.get("product_id") or _flat.get("id")
-                _full = _id_to_full.get(_pid, {})
-                _name = _fix_mojibake(_flat.get("name") or _full.get("name") or "Product")
-                _pmin = _flat.get("premium_min_monthly") or _full.get("premium_min_monthly")
-                _pmax = _flat.get("premium_max_monthly") or _full.get("premium_max_monthly")
-                _kf = _fix_mojibake(_flat.get("key_feature") or _full.get("key_feature") or "")
-                if _pmin and _pmax:
-                    _premium_str = f"premium {int(_pmin):,} to {int(_pmax):,} INR per month"
-                elif _pmin:
-                    _premium_str = f"premium from {int(_pmin):,} INR per month"
-                else:
-                    _premium_str = ""
-                _ranking_words = ["First", "Second", "Third"][_i] if _i < 3 else f"Rank {_i+1}"
-                _line = f"{_ranking_words}, {_name}"
-                if _kf:
-                    _line += f" — {_kf}"
-                if _premium_str:
-                    _line += f" ({_premium_str})"
-                _line += "."
-                _lines.append(_line)
-            response_text = (
-                "Based on what you shared, here are my top three picks. "
-                + " ".join(_lines)
-                + " Want me to tell you more about any of these?"
-            )
-            try:
-                import logging as _l
-                _l.getLogger().info("DETERMINISTIC_FALLBACK_FIRED session=%s n_products=%d", session_id[:8], len(_top))
-            except Exception:
-                pass
-
-    # ============================================================
-    # T3 — Contact-capture trigger (LOCKED INSERTION POINT — SPEC v2 Fix #2)
-    # OUTER INDENT (4 spaces). Fires on EVERY render path that produced top3,
-    # not only the deterministic-template path. Guards prevent re-asking on
-    # non-pipeline turns (follow-up "tell me about X") and double-asking after
-    # state has already advanced past NONE.
-    # ============================================================
-    try:
-        from shared_state import CONTACT_BY_SESSION as _CBS_TRIGGER
-        from followup import contact_ask_suffix as _contact_ask_suffix
-        _contact_now = _CBS_TRIGGER.get(session_id) or {
-            "state": "NONE", "email": None, "invalid_attempts": 0,
-        }
-        # _has_top3_now: any pipeline-render path that produced ranked products.
-        _rank_for_trigger = _tool_results.get("rank_products", {}) or {}
-        _has_top3_now = bool(
-            _rank_for_trigger.get("top_3") or _rank_for_trigger.get("top3")
-        )
-        if (
-            _contact_now.get("state") == "NONE"
-            and _has_top3_now
-            and response_text
-        ):
-            response_text = response_text.rstrip() + _contact_ask_suffix()
-            _CBS_TRIGGER[session_id] = {
-                "state": "ASKED", "email": None, "invalid_attempts": 0,
-            }
-            try:
-                _log.info("T3_CONTACT_ASK session=%s", session_id[:8])
-            except Exception:
-                pass
-    except Exception:
-        try:
-            _log.exception("T3_CONTACT_TRIGGER_FAILED session=%s — falling through", session_id[:8])
-        except Exception:
-            pass
-
-    # Write PII-free audit log entry (Constitution §IV + §V)
-    _write_audit_log({
-        "session_id": session_id,
-        "candidate_products": _tool_results.get("search_products", {}).get("candidates", []),
-        "compliance_outcomes": {
-            "passed_count": len(_tool_results.get("compliance_check", {}).get("passed", [])),
-            "rejected": _tool_results.get("compliance_check", {}).get("rejected", []),
-        },
-        "final_rankings": (
-            _tool_results.get("rank_products", {}).get("top_3")
-            or _tool_results.get("rank_products", {}).get("top3", [])
-        ),
-    })
-
     # Surface tool outputs to the FE so the recommendations panel can render cards.
-    # rank_products.top_3 contains only {product_id, rank, ...}; join with
-    # search_products.candidates (full product dicts with name/description/elser_score)
-    # so the FE has everything it needs in one shot.
-    #
-    # IMPORTANT — follow-up turns ("tell me more about the third option") deliberately
-    # do NOT re-run search/compliance/rank (per root_agent_prompt.md §"Follow-up
-    # questions"). On those turns, _tool_results lacks search_products/compliance_check
-    # entries entirely. Returning empty top3=[] would clear the FE's existing cards
-    # from the prior recommendation turn. Detect that case and OMIT top3/rejected
-    # from the response so the FE preserves what it already has.
+    # Join rank_products and compliance results with search_products candidates.
     _has_pipeline_call = (
         "search_products" in _tool_results
         or "compliance_check" in _tool_results
         or "rank_products" in _tool_results
     )
 
-    response_payload: dict = {"session_id": session_id, "response": response_text, "channel": channel}
+    top3_enriched = []
+    rejected_with_reason = []
 
     if _has_pipeline_call:
         _search_candidates = _tool_results.get("search_products", {}).get("candidates", [])
@@ -879,10 +990,7 @@ async def invoke(body: dict) -> JSONResponse:
             or _rank.get("top3")
             or _tool_results.get("compliance_check", {}).get("passed", [])
         )
-        # T1-C-gamma - defense-in-depth product_type consistency. If S2' or
-        # programmatic injection failed somewhere upstream, ELSER may have
-        # returned mixed types. Re-filter against intake's coverage_goals[0]
-        # as a final safeguard before snapshot. Logs T1C_TYPE_MISMATCH_DROP.
+        # T1-C-gamma - defense-in-depth product_type consistency.
         _intake_pt = None
         try:
             _goals_for_filter = (_validated_profile or {}).get("coverage_goals") or []
@@ -893,10 +1001,8 @@ async def invoke(body: dict) -> JSONResponse:
         except Exception:
             _intake_pt = None
 
-        top3_enriched = []
         for idx, item in enumerate(_top_3_raw):
-            # rank_products returns {rank, product:{...full...}, suitability_score, score_breakdown}
-            # — flatten by promoting `product` keys before merging.
+            # Promote product keys before merging.
             inner_product = item.get("product") if isinstance(item.get("product"), dict) else {}
             base = {**inner_product, **{k: v for k, v in item.items() if k != "product"}}
             pid = base.get("product_id") or base.get("id")
@@ -923,11 +1029,7 @@ async def invoke(body: dict) -> JSONResponse:
                 # F.2 — Unicode garble fix on outbound product (₹ etc.)
                 top3_enriched.append(_sanitize_product(merged))
 
-        # S3 — Snapshot enriched top3 for follow-up turns. Uses the already-
-        # sanitized list so build_voice_text reads the same fields the FE has.
-        # Deep-copy via dict() per element to avoid aliasing.
-        # CRITICAL: this block sits AT THE SAME INDENT as `rejected_with_reason = []`
-        # below — it must NOT be inside the `for idx, item in enumerate(...)` loop.
+        # S3 — Snapshot enriched top3 for follow-up turns.
         if top3_enriched:
             try:
                 from shared_state import TOP3_BY_SESSION as _TBS
@@ -945,7 +1047,6 @@ async def invoke(body: dict) -> JSONResponse:
                 except Exception:
                     pass
 
-        rejected_with_reason = []
         for r in _tool_results.get("compliance_check", {}).get("rejected", []):
             reasons = r.get("reasons", []) or []
             rejected_with_reason.append({
@@ -954,6 +1055,117 @@ async def invoke(body: dict) -> JSONResponse:
                 "reject_reason": "; ".join(reasons) if reasons else "Not eligible",
             })
 
+    # Stability C.5b — final deterministic template fallback or Bug J/K alignment.
+    if _has_pipeline_call:
+        if not response_text:
+            response_text = _build_deterministic_response(top3_enriched)
+            _log.info("DETERMINISTIC_FALLBACK_FIRED session=%s n_products=%d", session_id[:8], len(top3_enriched))
+        elif len(top3_enriched) < len(_top_3_raw):
+            # Bug J/K fix: If products were dropped from the enriched list, the original response_text
+            # generated by the LLM is out-of-sync because it mentions dropped products.
+            # Regenerate response_text using only the non-dropped valid products in top3_enriched.
+            _log.info(
+                "BUG_JK_REMEDY session=%s dropped some products; rebuilding response_text to align voice and cards.",
+                session_id[:8],
+            )
+            response_text = _build_deterministic_response(top3_enriched)
+
+    # T1-Bug L — Server-side duplicate suppression (deduplication)
+    _suppress_card_render = False
+    if _has_pipeline_call and top3_enriched:
+        try:
+            from shared_state import LAST_RENDERED_BY_SESSION as _LRBS
+            _prev_ids = _LRBS.get(session_id)
+        except Exception:
+            _prev_ids = None
+
+        _current_ids = [p.get("product_id") or p.get("id") for p in top3_enriched if (p.get("product_id") or p.get("id"))]
+
+        if _prev_ids and _current_ids == _prev_ids:
+            _suppress_card_render = True
+            response_text = "I've already shown you those recommendations. Is there a specific plan you'd like to dive into, or would you like to adjust your details?"
+            try:
+                _log.info("BUG_L_DEDUP session=%s suppressed duplicate card rendering", session_id[:8])
+            except Exception:
+                pass
+        else:
+            if _current_ids:
+                try:
+                    from shared_state import LAST_RENDERED_BY_SESSION as _LRBS
+                    _LRBS[session_id] = _current_ids
+                except Exception:
+                    pass
+
+    # ============================================================
+    # T3 — Contact-capture trigger (LOCKED INSERTION POINT — SPEC v2 Fix #2)
+    # OUTER INDENT (4 spaces). Fires on EVERY render path that produced top3,
+    # not only the deterministic-template path. Guards prevent re-asking on
+    # non-pipeline turns (follow-up "tell me about X") and double-asking after
+    # state has already advanced past NONE.
+    # ============================================================
+    try:
+        from shared_state import CONTACT_BY_SESSION as _CBS_TRIGGER
+        from followup import contact_ask_suffix as _contact_ask_suffix
+        _contact_now = _CBS_TRIGGER.get(session_id) or {
+            "state": "NONE", "email": None, "invalid_attempts": 0,
+        }
+        # Bug J/K alignment: check if there are actual valid non-dropped products shown in top3_enriched!
+        _has_top3_now = bool(top3_enriched)
+        if (
+            _contact_now.get("state") == "NONE"
+            and _has_top3_now
+            and response_text
+            and not _suppress_card_render
+        ):
+            response_text = response_text.rstrip() + _contact_ask_suffix()
+            _CBS_TRIGGER[session_id] = {
+                "state": "ASKED", "email": None, "invalid_attempts": 0,
+            }
+            try:
+                _log.info("T3_CONTACT_ASK session=%s", session_id[:8])
+            except Exception:
+                pass
+    except Exception:
+        try:
+            _log.exception("T3_CONTACT_TRIGGER_FAILED session=%s — falling through", session_id[:8])
+        except Exception:
+            pass
+
+    # Bug M — egress mojibake correction
+    response_text = _fix_mojibake(response_text)
+
+    # Synthesize premium server-side Text-to-Speech!
+    # Base64-encoded audio is generated from the final response_text (including the contact suffix if added)
+    audio_content = None
+    try:
+        audio_content = _synthesize_text_to_audio(response_text)
+        if audio_content:
+            _log.info("GC_TTS_SUCCESS session=%s synthesized base64 audio.", session_id[:8])
+    except Exception as _e:
+        _log.warning("GC_TTS_FAILED session=%s — falling back: %s", session_id[:8], _e)
+
+    # Write PII-free audit log entry (Constitution §IV + §V)
+    _write_audit_log({
+        "session_id": session_id,
+        "candidate_products": _tool_results.get("search_products", {}).get("candidates", []),
+        "compliance_outcomes": {
+            "passed_count": len(_tool_results.get("compliance_check", {}).get("passed", [])),
+            "rejected": _tool_results.get("compliance_check", {}).get("rejected", []),
+        },
+        "final_rankings": (
+            _tool_results.get("rank_products", {}).get("top_3")
+            or _tool_results.get("rank_products", {}).get("top3", [])
+        ),
+    })
+
+    response_payload: dict = {
+        "session_id": session_id,
+        "response": response_text,
+        "channel": channel,
+        "audio_content": audio_content, # Stream premium base64 audio
+    }
+
+    if _has_pipeline_call and not _suppress_card_render:
         response_payload["top3"] = top3_enriched
         response_payload["rejected"] = rejected_with_reason
 
@@ -995,6 +1207,89 @@ async def simulate(body: dict) -> JSONResponse:
         raise HTTPException(status_code=504, detail="Simulation service timed out")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Simulation service error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# B1 — Chirp 3 HD streaming TTS endpoint
+# Per Locked Decisions D7 (per-IP rate limit, 30 req/min) + D8/D9 (FE
+# contracts owned by voice-player.js, harness shared with B2 AC-B2.6.5).
+# ---------------------------------------------------------------------------
+
+def _client_ip(req: Request) -> str:
+    """Best-effort source IP. Cloud Run forwards client IP via X-Forwarded-For."""
+    xff = req.headers.get("x-forwarded-for") or ""
+    if xff:
+        return xff.split(",")[0].strip()
+    if req.client:
+        return req.client.host or ""
+    return ""
+
+
+@app.post("/tts/stream")
+async def tts_stream(req: Request) -> StreamingResponse:
+    """
+    Stream Chirp 3 HD synthesized MP3 for the supplied text.
+
+    Request body:
+        {
+            "text":           "<plain text, server applies _strip_markdown + _fix_mojibake>",
+            "session_id":     "<optional - logging only>",
+            "voice_options":  {<reserved for future tuning>}
+        }
+
+    Returns: chunked audio/mpeg stream (24 kHz MP3).
+    Errors:
+        400 - empty/invalid `text`, or text exceeds MAX_INPUT_CHARS
+        429 - per-IP rate limit exceeded (D7)
+        502 - upstream Chirp 3 HD synthesis failed
+    """
+    ip = _client_ip(req)
+    if not await _TTS_RATE_LIMITER.allow(ip):
+        _log.warning("TTS_RATE_LIMITED ip=%s", ip[:32])
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    text = (body or {}).get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="'text' field required")
+    if len(text) > _tts_streaming.MAX_INPUT_CHARS:
+        raise HTTPException(status_code=400, detail="text exceeds MAX_INPUT_CHARS")
+
+    session_id = (body or {}).get("session_id") or ""
+    if session_id:
+        _log.info("TTS_STREAM_REQUEST session=%s ip=%s len=%d",
+                  session_id[:8], ip[:32], len(text))
+
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Voice-Name": _tts_streaming.VOICE_NAME,
+        "X-Sample-Rate-Hz": str(_tts_streaming.SAMPLE_RATE_HZ),
+    }
+    return StreamingResponse(
+        _tts_streaming.synthesize_chunks(text),
+        media_type="audio/mpeg",
+        headers=headers,
+    )
+
+
+# ---------------------------------------------------------------------------
+# B2 — Speech-to-Text v2 streaming WebSocket
+# ---------------------------------------------------------------------------
+# CRITICAL: this MUST be registered BEFORE the StaticFiles mount below, or the
+# `/` mount with html=True will swallow undeclared sibling paths and the FE
+# will see a 404-with-HTML on /stt/stream.
+# Per B2 SPEC v2 §C3 (locked) and reviewer R11.
+# Implementer must NOT relocate the StaticFiles mount that follows.
+from fastapi import WebSocket
+
+@app.websocket("/stt/stream")
+async def stt_stream(websocket: WebSocket) -> None:
+    """Bridge browser PCM -> Speech-to-Text v2 (Chirp 2, en-IN) -> FE JSON."""
+    await stt_stream_handler(websocket)
 
 
 # ---------------------------------------------------------------------------

@@ -62,42 +62,54 @@ def _try_real_or_stub(modname, **stub_attrs):
 # even if google-adk is pip-installed, we still stub here because main.py's
 # Runner(...) call requires a real LlmAgent which we can't construct without
 # actual env vars + GCP creds.
-for _adk_mod in (
-    "google.adk",
-    "google.adk.runners",
-    "google.adk.sessions",
-    "google.adk.agents",
-    "google.adk.tools",
-    "google.adk.tools.mcp",
-    "google.adk.tools.function_tool",
-):
-    sys.modules.setdefault(
-        _adk_mod,
-        _stub(
+# google.adk namespace hierarchy — try importing real first; only stub if missing.
+try:
+    import google.adk
+except Exception:
+    for _adk_mod in (
+        "google.adk",
+        "google.adk.runners",
+        "google.adk.sessions",
+        "google.adk.agents",
+        "google.adk.tools",
+        "google.adk.tools.mcp",
+        "google.adk.tools.function_tool",
+    ):
+        sys.modules.setdefault(
             _adk_mod,
-            Runner=MagicMock,
-            InMemorySessionService=MagicMock,
-            LlmAgent=MagicMock,
-            MCPToolset=MagicMock,
-            FunctionTool=MagicMock,
-            AgentTool=MagicMock,
-        ),
-    )
-# Attach adk onto the google namespace package
-_google_mod = sys.modules.get("google")
-if _google_mod is None:
-    _google_mod = _stub("google")
-    sys.modules["google"] = _google_mod
-if not hasattr(_google_mod, "adk"):
-    _google_mod.adk = sys.modules["google.adk"]
+            _stub(
+                _adk_mod,
+                Runner=MagicMock,
+                InMemorySessionService=MagicMock,
+                LlmAgent=MagicMock,
+                MCPToolset=MagicMock,
+                FunctionTool=MagicMock,
+                AgentTool=MagicMock,
+            ),
+        )
+    # Attach adk onto the google namespace package
+    _google_mod = sys.modules.get("google")
+    if _google_mod is None:
+        _google_mod = _stub("google")
+        sys.modules["google"] = _google_mod
+    if not hasattr(_google_mod, "adk"):
+        _google_mod.adk = sys.modules["google.adk"]
 
-# google.genai + google.genai.types
-_genai_types_stub = _stub("google.genai.types")
-_genai_stub = _stub("google.genai", types=_genai_types_stub)
-sys.modules.setdefault("google.genai", _genai_stub)
-sys.modules.setdefault("google.genai.types", _genai_types_stub)
-if not hasattr(_google_mod, "genai"):
-    _google_mod.genai = _genai_stub
+# google.genai + google.genai.types — try importing real first; only stub if missing.
+try:
+    import google.genai
+except Exception:
+    _genai_types_stub = _stub("google.genai.types")
+    _genai_stub = _stub("google.genai", types=_genai_types_stub)
+    sys.modules.setdefault("google.genai", _genai_stub)
+    sys.modules.setdefault("google.genai.types", _genai_types_stub)
+    _google_mod = sys.modules.get("google")
+    if _google_mod is None:
+        _google_mod = _stub("google")
+        sys.modules["google"] = _google_mod
+    if not hasattr(_google_mod, "genai"):
+        _google_mod.genai = _genai_stub
+
 
 # fastapi — try real first; only stub if missing. Stubbing fastapi as a plain
 # module (not package) breaks `fastapi.testclient` for sibling tests in the

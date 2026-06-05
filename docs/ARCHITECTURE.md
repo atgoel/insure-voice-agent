@@ -1,9 +1,10 @@
 # InsureVoice — Architecture Deep Dive
 ## Google Cloud Agent Builder + Elastic ELSER + Vertex AI Gemini
 
-> **Last updated**: 2026-06-03 (Day 6 EOD, post-bundle deploy)
-> **Status**: Production — Day 5 stability sprint + Day 6 Atul-domain follow-up bundle deployed; full demo arc validated end-to-end against live infrastructure.
-> **Active branch**: `abhishek-stable-branch` (parent: `abhishek-day5-stability` @ commit `6370905`)
+> **Last updated**: 2026-06-05 (Day 8 EOD, Tier B implemented in `stable_v4` — pre-push, pre-deploy)
+> **Status**: Live revision `00030-jc7` (Day 7 baseline) serves 100% traffic. Tier B voice-stack swap (B1 Chirp 3 HD TTS + B2 Speech-to-Text v2 + B4 Flash-Lite intent classifier) is in-tree on `stable_v4` and will deploy to a new revision with `--no-traffic` on Day 9 before traffic promotion.
+> **Active branch**: `abhishek-stable-branch` (parent at push: `2cb367e` — Day 7 baseline)
+> **Test suite (Day 8, `stable_v4`)**: **567 passed / 29 skipped / 0 failed** (~28.86s). Up from 551 by +12 (`test_intent_classifier.py`) + 4 (`test_b2_resume_tail.py`).
 
 ---
 
@@ -50,14 +51,150 @@ For the per-sub-task evidence trail, see `STABILITY_CHANGELOG.md` (the canonical
 
 ---
 
+## What Changed Day 7 → Day 8 (Tier B Voice-Stack Swap, 2026-06-05)
+
+Tier B replaces the browser-native voice stack (Web Speech API STT + `SpeechSynthesisUtterance` TTS) with a Google Cloud voice stack and adds an LLM-based intent classifier on follow-up turns. **All Tier B work is in-tree on `stable_v4` but NOT yet deployed** — live revision `00030-jc7` is still the Day 7 baseline.
+
+### New backend modules
+
+| Module | Purpose | Public API |
+|---|---|---|
+| `agent_builder/tts_streaming.py` (B1, 396 lines) | Streaming TTS over Google Cloud Text-to-Speech, voice `en-IN-Chirp3-HD-Aoede`, 24kHz MP3. Per-IP `collections.deque` rate limiter (30 req/min, 429 on breach). | `synthesize_bytes(text)`, `synthesize_chunks(text)` async generator. |
+| `agent_builder/stt_websocket.py` (B2, 549 lines) | Speech-to-Text v2 + Chirp 2 model + native VAD tuned to 800ms. WebSocket transport. en-IN. Graceful `SDK_UNAVAILABLE` degradation if `google-cloud-speech` isn't importable. | `stt_stream_handler(websocket)` FastAPI route handler. |
+| `agent_builder/intent_classifier.py` (B4, 565 lines) | Gemini 2.5 Flash-Lite intent classifier as a separate `LlmAgent` sub-agent. Own ADK `Runner` and own `before_model_callback=_force_classifier_tool`. Returns one of `NAMED_PRODUCT` / `ORDINAL` / `POLICY_QUESTION` / `AMBIGUOUS` with confidence. | `classify_intent_async`, `classify_followup_intent`, `init_classifier_runner`. |
+
+### New frontend modules
+
+| Module | Purpose |
+|---|---|
+| `agent_builder/frontend/voice-player.js` (428 lines) | `<audio>` MediaSource MP3 player + D8 lock/resume hooks around `window.__voiceAudioCtx`. |
+| `agent_builder/frontend/voice/stt-client.js` | WebSocket STT client. Publishes `window.__voiceAudioCtx` + `window.__voiceMicSuspended` on init. |
+| `agent_builder/frontend/voice/audio-worklet-processor.js` | AudioWorkletProcessor for low-latency 16kHz PCM mic capture. |
+
+### New endpoints in `main.py`
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/tts/stream` | B1. In-memory per-IP rate limit 30 req/min (deque). 429 on breach. |
+| `WebSocket` | `/stt/stream` | B2. **Must be registered BEFORE the StaticFiles mount on `/`** — the static mount uses `html=True` and would otherwise swallow undeclared sibling paths (including the WebSocket upgrade). |
+
+### B4 dispatch in `/invoke` (Phase 1c — follow-up turns only)
+
+When intake is complete AND `top3` is present in `shared_state.TOP3_BY_SESSION` AND the env var `USE_LLM_INTENT_CLASSIFIER` is truthy (default **off**), `/invoke` dispatches the classifier BEFORE the existing regex `detect_followup_intent` path:
+
+```
+1. Read top3_ids from shared_state.TOP3_BY_SESSION[session_id]
+2. classification = await classify_intent_async(session_id, user_message, top3_ids, user_id)
+3. decision     = route_classification(classification)
+4. Branch on decision["action"]:
+     ROUTE_NAMED   → resolve top3 product by target_product_id → return build_voice_text(matched)   (NO LLM)
+     ROUTE_ORDINAL → resolve top3[ordinal_index]               → return build_voice_text(matched)   (NO LLM)
+     CLARIFY       → return clarification text                                                       (NO LLM)
+     ESCALATE      → return no_match_voice_text()                                                    (NO LLM)
+     FREE_FORM     → set _skip_regex_followup = True; raise LookupError("B4_FREE_FORM_BYPASS")
+                     to land at the LLM passthrough below (M2 fix — POLICY_QUESTION → free-form, NOT B5)
+     FALLBACK_LLM  → fall through to existing regex detect_followup_intent path (low-confidence safe default)
+5. Any exception in classifier → log B4_DISPATCH_FAILED, fall through to regex path (defense-in-depth)
+```
+
+**Confidence thresholds:**
+
+| Confidence | Action |
+|---|---|
+| ≥ 0.7 | Honor classification (`ROUTE_NAMED` / `ROUTE_ORDINAL` / `FREE_FORM` per intent) |
+| 0.5 ≤ c < 0.7 | Force-clarify band → `CLARIFY` regardless of intent |
+| < 0.5 | `FALLBACK_LLM` — defer to regex path |
+
+**Feature flag:** `USE_LLM_INTENT_CLASSIFIER` env var. Default **off** for the Day 9 first deploy — flip on after `--no-traffic` smoke test passes against rev `00031` (or whatever the next promoted revision is).
+
+### End-to-end voice flow (Tier B)
+
+```
+USER SPEAKS
+  ↓ (mic 16kHz PCM via AudioWorklet)
+WebSocket /stt/stream
+  ↓ (gRPC to Speech-to-Text v2 / Chirp 2, server-side VAD 800ms)
+text → /invoke
+  ↓ (root agent + intake + recommendation)
+[optional B4 classifier sub-agent for follow-up turns]
+  ↓ (Runner with app_name="insure-voice-classifier")
+text response → /tts/stream POST
+  ↓ (Chirp 3 HD synthesize, 24kHz MP3)
+MediaSource <audio> → user hears
+```
+
+The pre-LLM / LLM-pipeline / post-LLM 3-phase architecture from Day 5/6 is unchanged. B4 hooks in at the start of Phase 1c (follow-up dispatch) and only invokes the Flash-Lite classifier sub-agent when `USE_LLM_INTENT_CLASSIFIER=true`. Below the 0.7 confidence threshold the agent falls back to the existing regex path in `followup.py`. Above 0.7 it routes to the corresponding deterministic branch (`NAMED_PRODUCT` / `ORDINAL`) or — for `POLICY_QUESTION` — falls through to the LLM passthrough via the M2 `_skip_regex_followup` flag.
+
+### D8 contract — FE↔BE coordination via two browser globals
+
+To prevent the Chirp 3 playback from being captured by the open mic and re-transcribed (the "agent transcribes its own voice" echo bug), B1 and B2 coordinate via two `window` globals:
+
+```
+window.__voiceAudioCtx       // The mic-capture AudioContext. B2 publishes on STT init; B1 reads only.
+window.__voiceMicSuspended   // Boolean flag. B2 initializes; B1 toggles around <audio> playback.
+```
+
+Sequence on TTS playback:
+
+1. `<audio>.onplay` → B1 calls `window.__voiceAudioCtx.suspend()` → mic goes silent.
+2. TTS finishes → `<audio>.onended` → **B1 waits 200ms (echo decay)** → calls `.resume()` → mic listens again.
+
+The 200ms echo-tail is load-bearing — without it, the mic captures the speaker echo's tail and the agent transcribes its own goodbye. The Reviewer M1 fix removed an earlier mistake in `voice-player.js` where the player was creating + publishing the `window.__voiceAudioCtx` global itself (inverting the contract). It now uses a null-safe `_readAudioCtx` helper and reads only.
+
+### D10 contract — separate Runner / separate `app_name` for the classifier
+
+The B4 classifier is a separate `LlmAgent` with its own ADK `Runner`, registered under `app_name="insure-voice-classifier"` rather than the root agent's `app_name="insure-voice"`. Why: ADK supports exactly one `before_model_callback` per agent. The root `LlmAgent` already has `_force_tool_call_mid_pipeline` (the C.5 enforcement callback from Day 5). Running the classifier on the same Runner would either fight that callback or leak the classifier's `function_response` events into the root agent's session event log and break the C.5 mid-pipeline state machine. Separate `app_name` isolates the two sessions cleanly. The classifier callback is `_force_classifier_tool`.
+
+### D13 — `CANONICAL_FAREWELL_TEXT` constant
+
+`followup.py:393` was previously a `farewell_voice_text()` function. It is now a module-level constant `CANONICAL_FAREWELL_TEXT = "..."` with a back-compat lambda `farewell_voice_text = lambda: CANONICAL_FAREWELL_TEXT` for callers that still invoke it as a function. Required predecessor for the deferred B7 eval harness (byte-identical assertions on done_001 / done_002 cases).
+
+### D1 — B3 (Silero VAD) DROPPED
+
+The original Tier B plan included Silero VAD as a fourth sub-task (browser-side neural VAD via ONNX, ~150-300ms barge-in latency win). It was dropped on 2026-06-05 because Silero is a neural net at inference time — plausibly violates the Devpost rule "all other AI tools not permitted". Server-side VAD from Speech-to-Text v2 (D2's `voice_activity_events` at 800ms) is the only VAD layer.
+
+### Hackathon-rule audit (Tier B)
+
+| Sub-task | Uses | Rule check |
+|---|---|---|
+| B1 — Chirp 3 HD TTS | Google Cloud Text-to-Speech API | ✅ Google Cloud, not "AI tool". |
+| B2 — STT v2 streaming | Google Cloud Speech-to-Text v2 + Chirp 2 | ✅ Same vendor, same tier. |
+| B4 — Flash-Lite classifier | Gemini 2.5 Flash-Lite via ADK | ✅ Gemini is mandated. |
+| ~~B3 — Silero VAD~~ | Open-source ONNX neural net | ❌ DROPPED (D1). |
+
+**Verdict:** Tier B is rule-compliant. Everything on Google Cloud's stack.
+
+### Reviewer pass — M1 + M2
+
+* **M1** — `voice-player.js` `_ensureAudioCtx` removed → `_readAudioCtx` null-safe read (D8 contract restored — B1 reads `window.__voiceAudioCtx`, never publishes it; B2 owns the publish).
+* **M2** — `main.py` adds `_skip_regex_followup` flag for the FREE_FORM intent path; raises `LookupError("B4_FREE_FORM_BYPASS")` (caught at `main.py:680`-ish) to land at the LLM passthrough below.
+
+### Deploy status (Day 8 EOD)
+
+| Item | Status |
+|---|---|
+| Live serving revision | `00030-jc7` (Day 7 baseline) — 100% traffic. Tier B is **NOT** on this revision. |
+| `stable_v4` test suite | **567 PASS / 29 SKIP / 0 FAIL** (~28.86s) — up from 551 baseline (+12 `test_intent_classifier.py` + 4 `test_b2_resume_tail.py`). |
+| Day 9 plan | Cloud Build deploy to a new revision with `--no-traffic`. Browser smoke test (mic + speaker echo). Then promote traffic. |
+| Feature flag default at first deploy | `USE_LLM_INTENT_CLASSIFIER=false` — classifier code lives in the image but the dispatch is a no-op until the flag is flipped. Roll-back is one env-var change. |
+| Deferred (post-Day 9) | AC-B4.11 40-call live latency probe; B5/B6/B7 implementer fan-out; classifier session GC after `clf-{session_id}` extraction. |
+
+---
+
 ## System Overview
 
 InsureVoice is a multi-layer AI system. Each layer is independently deployable and testable.
 
+> **Note (2026-06-05):** Layer 1 below shows the **Day 7 baseline (live `00030-jc7`)**. The Tier B Day 8 swap (Chirp 3 HD TTS + STT v2 WebSocket + Flash-Lite classifier) is in `stable_v4` but not yet on a serving revision. See "What Changed Day 7 → Day 8" above for the Day 8 voice-stack diagram.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  LAYER 1 — VOICE INTERFACE (browser-native, no Dialogflow)           │
+│  LAYER 1 — VOICE INTERFACE (browser-native — Day 7 baseline)         │
 │  Web Speech API STT · TTS WaveNet · WebRTC mic input                 │
+│  Day 8 (stable_v4, pre-deploy):                                      │
+│    STT  → WebSocket /stt/stream → Speech-to-Text v2 + Chirp 2        │
+│    TTS  → POST /tts/stream      → Chirp 3 HD (en-IN-Chirp3-HD-Aoede) │
+│    B4   → Flash-Lite classifier (separate Runner, follow-up turns)   │
 └──────────────────────────┬───────────────────────────────────────────┘
                            │ user message / session_id
 ┌──────────────────────────▼───────────────────────────────────────────┐
@@ -114,28 +251,37 @@ InsureVoice is a multi-layer AI system. Each layer is independently deployable a
 
 ## Layer 1: Voice Interface
 
-The current InsureVoice deployment uses a **browser-native voice frontend** (Web Speech API), not Dialogflow CX. The original plan included Dialogflow CX; the implemented architecture uses an in-browser STT/TTS pipeline served by the same Cloud Run service via static frontend.
+**Day 7 baseline (live revision `00030-jc7`):** browser-native voice frontend — Web Speech API STT (`webkitSpeechRecognition`) + Cloud TTS WaveNet (`en-IN-Wavenet-D`). The original plan included Dialogflow CX; the implemented architecture uses an in-browser STT/TTS pipeline served by the same Cloud Run service via static frontend.
 
-### Components
+**Day 8 (`stable_v4` working copy, NOT yet deployed):** swapped to a Google Cloud voice stack — see "What Changed Day 7 → Day 8" above for the full Tier B context.
+
+### Components — Day 8 Tier B (`stable_v4`)
 
 | Component | Technology | Role |
 |---|---|---|
-| Speech-to-Text | Web Speech API (`webkitSpeechRecognition`) | Browser-native streaming transcription |
+| Speech-to-Text | Google Cloud Speech-to-Text v2 + Chirp 2 model + native VAD 800ms via `WebSocket /stt/stream` (`stt_websocket.py` + `voice/stt-client.js` + `voice/audio-worklet-processor.js`) | en-IN. AudioWorklet 16kHz PCM mic capture. Pause-tolerant. ~92% baseline accuracy on Indian English vs ~75-80% browser. |
 | Conversation rendering | Vanilla JS + ELSER ranking badges | Live transcript panel + product cards |
-| Text-to-Speech | Cloud TTS WaveNet (`en-IN-Wavenet-D`) | Indian English voice synthesis |
+| Text-to-Speech | Google Cloud Text-to-Speech — Chirp 3 HD (`en-IN-Chirp3-HD-Aoede`, 24kHz MP3) via `POST /tts/stream` (`tts_streaming.py` + `voice-player.js`) | Natural human-sounding Indian English voice. PoC measured 1.57s cold start. Per-IP rate limit 30 req/min. |
 | Frontend bundling | Same-origin from `agent_builder/frontend/` | Cloud Run serves both API + static assets |
+
+### Components — Day 7 baseline (live `00030-jc7`)
+
+| Component | Technology | Role |
+|---|---|---|
+| Speech-to-Text | Web Speech API (`webkitSpeechRecognition`) | Browser-native streaming transcription with 1.2s silence-debounce |
+| Text-to-Speech | Cloud TTS WaveNet (`en-IN-Wavenet-D`) | Indian English voice synthesis |
 
 ### Voice Latency Targets
 
-| Step | Target Latency | Actual (verified) |
-|---|---|---|
-| STT transcription | < 1.5s (streaming) | ~0.5s (browser-native) |
-| Agent /invoke (intake turn) | < 200ms | ~50ms (deterministic Python) |
-| Agent /invoke (follow-up turn) | < 200ms | ~10ms (S3 deterministic, no LLM) |
-| Agent /invoke (pipeline turn 9) | < 8s | ~7-10s (search → compliance → rank → recommend) |
-| TTS synthesis | < 0.5s | ~0.4s |
+| Step | Target Latency | Actual (verified) | Day 8 Tier B (PoC, not yet live) |
+|---|---|---|---|
+| STT transcription | < 1.5s (streaming) | ~0.5s (browser-native) | Speech-to-Text v2 + Chirp 2: end-of-utterance ~0.6-1.0s expected; AC-B4.11 40-call probe deferred to Day 9 |
+| Agent /invoke (intake turn) | < 200ms | ~50ms (deterministic Python) | unchanged |
+| Agent /invoke (follow-up turn) | < 200ms | ~10ms (S3 deterministic, no LLM) | with B4 ON: +1 Flash-Lite call (~600-800ms p50). With flag OFF (Day 9 first deploy): unchanged. |
+| Agent /invoke (pipeline turn 9) | < 8s | ~7-10s (search → compliance → rank → recommend) | unchanged |
+| TTS synthesis | < 0.5s | ~0.4s (browser `SpeechSynthesisUtterance` / WaveNet) | Chirp 3 HD PoC: 1.57s cold, well under 2s target |
 
-**Latency note:** intake turns + follow-up turns are sub-100ms because they bypass the LLM entirely. Only the pipeline-firing turn (after intake completion) hits the full 7-10s budget. This is by design — most user turns are fast.
+**Latency note:** intake turns + follow-up turns are sub-100ms because they bypass the LLM entirely. Only the pipeline-firing turn (after intake completion) hits the full 7-10s budget. This is by design — most user turns are fast. Tier B's B4 classifier (when enabled) adds one extra Flash-Lite call (~600-800ms p50) on follow-up turns; AC-B6.0 measurement gate from Locked_Decisions.md decides whether to keep B6 backchannel based on live recommendation-turn p50 against a 1500ms threshold.
 
 ---
 
@@ -166,6 +312,16 @@ def /invoke(message, session_id):
 
     else:
         # Phase 1c — S3 follow-up dispatch (intake already complete)
+        # NEW Day 8 (B4): if USE_LLM_INTENT_CLASSIFIER and top3 present, run the
+        # Flash-Lite classifier sub-agent FIRST (separate Runner / app_name=
+        # "insure-voice-classifier"). Branch on route_classification(...):
+        #   ROUTE_NAMED / ROUTE_ORDINAL → return deterministic voice text (NO LLM)
+        #   CLARIFY                     → return clarification text       (NO LLM)
+        #   ESCALATE                    → return no_match_voice_text()    (NO LLM)
+        #   FREE_FORM                   → _skip_regex_followup=True;
+        #                                 raise LookupError("B4_FREE_FORM_BYPASS")
+        #                                 → land at LLM passthrough (M2 fix)
+        #   FALLBACK_LLM / exception    → fall through to regex path below
         intent = detect_followup_intent(message)
         top3 = shared_state.TOP3_BY_SESSION.get(session_id) or []
         if intent in ("named", "ordinal") and top3:
@@ -211,6 +367,7 @@ root_agent = LlmAgent(
 | `GOOGLE_GENAI_USE_VERTEXAI` | `TRUE` |
 | `GOOGLE_CLOUD_PROJECT` | `voice-sales-agent` |
 | `GOOGLE_CLOUD_LOCATION` | `us-central1` |
+| `USE_LLM_INTENT_CLASSIFIER` | (Day 8 Tier B) `false` by default. Set truthy to enable B4 classifier dispatch in `/invoke` Phase 1c. |
 
 ### Phase 3: Post-LLM (Deterministic Completion + Snapshot)
 
@@ -521,7 +678,9 @@ All log lines are INFO/WARNING/ERROR on Python's root logger, captured by Cloud 
 | `S3_FOLLOWUP_MISS session=<id> reason=<no_product_match\|compare_parked\|no_top3_in_state>` | Graceful fall-through | Same |
 | `S3_TOP3_SNAPSHOT session=<id> n=<count>` | Top3 captured for next turn | `main.py` Insertion C (post-pipeline) |
 | `AGENT_EVENT session=<id> final=<bool> parts=<list>` | C.2 LLM event tracing | LlmAgent run loop |
-| `CALLBACK_DEBUG last_fr=<tool> n_events=<N> forced=<tool>` | C.5 mechanical routing decision | `_route_next_tool_callback` |
+| `CALLBACK_DEBUG last_fr=<tool> n_events=<N> forced=<tool>` | C.5 mechanical routing decision | `_route_next_tool_callback` (alias of `_force_tool_call_mid_pipeline`, `agent_definition.py:428`) |
+| `B4_DISPATCH session=<id> action=<ROUTE_NAMED\|ROUTE_ORDINAL\|CLARIFY\|ESCALATE\|FREE_FORM\|FALLBACK_LLM> tid=<product_id>` | NEW Day 8 — B4 classifier branch decision | `main.py` Phase 1c (after `await classify_intent_async`) |
+| `B4_DISPATCH_FAILED session=<id>` | NEW Day 8 — classifier raised; falling through to regex path | Same |
 
 **Demo monitoring during live test:** grep for `S3_FOLLOWUP_HIT`, `S3_VOICE`, `S2_INJECT`, `INTAKE_COMPLETE`, `S3_RESET`. ZERO `AGENT_EVENT` after a follow-up turn proves the LLM bypass is working.
 
@@ -531,18 +690,27 @@ All log lines are INFO/WARNING/ERROR on Python's root logger, captured by Cloud 
 
 ```
 agent_builder/
-├── main.py                          # FastAPI /invoke + 3-phase pipeline orchestrator
+├── main.py                          # FastAPI /invoke + /tts/stream + WebSocket /stt/stream + 3-phase pipeline orchestrator
 ├── agent_definition.py              # LlmAgent + tools + C.5 callback + S2' inject
 ├── intake.py                        # P.2 8-field state machine + validators (Day 5)
-├── shared_state.py                  # NEW Day 6 — PROFILE_BY_SESSION, TOP3_BY_SESSION
-├── followup.py                      # NEW Day 6 — S3 intent detector + voice generator
+├── shared_state.py                  # Day 6 — PROFILE_BY_SESSION, TOP3_BY_SESSION; Day 8 — LAST_RENDERED_BY_SESSION (Bug L)
+├── followup.py                      # Day 6 — S3 intent detector + voice generator. Day 8 — D13 CANONICAL_FAREWELL_TEXT constant.
+├── tts_streaming.py                 # NEW Day 8 (B1) — Chirp 3 HD streaming TTS. POST /tts/stream.
+├── stt_websocket.py                 # NEW Day 8 (B2) — Speech-to-Text v2 WebSocket handler. WebSocket /stt/stream.
+├── intent_classifier.py             # NEW Day 8 (B4) — Flash-Lite classifier sub-agent (separate Runner, app_name="insure-voice-classifier").
 ├── root_agent_prompt.md             # Root LlmAgent system prompt
 ├── sub_agent3_explainer_prompt.md   # recommend_and_explain prompt + S4 guardrails
 ├── sub_agent1_search_prompt.md      # legacy (retained for reference)
 ├── tools.yaml                       # Agent Builder tool registration (legacy artifact)
-├── requirements.txt                 # ADK 2.1.0, fastapi, httpx, etc.
+├── requirements.txt                 # ADK 2.1.0, fastapi, httpx; Day 8 adds google-cloud-texttospeech, google-cloud-speech, google-genai==1.75.0
 ├── Dockerfile                       # Cloud Run container build
 └── frontend/                        # Static voice UI (HTML/JS/CSS, served by Cloud Run)
+    ├── index.html                   # Day 8 — adds <script> tags for voice-player.js + voice/stt-client.js
+    ├── simulation.js                # Day 8 — UI hooks for voice-player + stt-client
+    ├── voice-player.js              # NEW Day 8 (B1 FE) — <audio> playback + D8 lock/resume hooks (M1 fix: read-only on window.__voiceAudioCtx)
+    └── voice/
+        ├── stt-client.js            # NEW Day 8 (B2 FE) — WebSocket STT client. Publishes window.__voiceAudioCtx + window.__voiceMicSuspended on init.
+        └── audio-worklet-processor.js  # NEW Day 8 (B2 FE) — 16kHz PCM mic capture worklet.
 ```
 
 ---
@@ -574,7 +742,7 @@ accept_recommendation event
 |---|---|---|
 | Module-level dict state | Works at `--max-instances=1` | Migrate to Firestore-backed sessions for horizontal scaling |
 | Cloud Function auth | Public (allow-unauthenticated) | Require IAM auth on `compliance_check` and `rank_products` |
-| Voice data privacy | STT in browser; nothing persisted | Confirm TTS isn't logging audio; add explicit GDPR opt-in |
+| Voice data privacy | Day 7: STT in browser, nothing persisted. Day 8 (`stable_v4`): STT audio streamed to Google Cloud Speech-to-Text v2; TTS text sent to Cloud Text-to-Speech. Cloud audit logging applies. | Confirm Speech/TTS APIs aren't retaining payloads (set `enableSpokenPunctuation=False`, opt out of data logging at project level); add explicit GDPR opt-in; review Cloud audit log retention. |
 | Elasticsearch access | API key (read+write) | Scope a read-only API key for the agent; rotate quarterly |
 | Open-source IP exposure | Synthetic catalog only | Verify no real product pricing or customer data before any release |
 | Catalog size | 28 products, 7 types | Day 7 backlog: expand to ~48 products with disease-specific descriptions |
@@ -590,6 +758,14 @@ accept_recommendation event
   - SPEC files in `reports/` (S2_ArgInjector, S3_C2_FollowUp, S4_PromptEdits)
   - Validation gates in `scripts/` (s2/s3/s5 validation arcs)
   - Verbatim transcripts and logs in `data/`
+- **Day 7 task folder:** `tasks/2026-06-04_hackathon_day7_polish_bugs/`
+  - `p3_tier_b_voice_stack/reports/` — Tier B Implementation Plan + 6 SPEC v2 docs (B1/B2/B4/B5/B6/B7) + 6 Reviewer Verdicts + Locked_Decisions.md (D1-D14)
+- **Day 8 task folder (Tier B implementation, 2026-06-05):** `tasks/2026-06-05_hackathon_day8_tier_b_implementation/`
+  - `reports/Tier_B_Plain_English_Walkthrough.md` — master plain-English summary of the Day 8 voice-stack swap
+  - `reports/D10_Runner_Spike_Result.md` — separate-Runner / separate-`app_name` architecture verification
+  - `reports/B1_Implementation_Report.md` · `reports/B2_Implementation_Report.md` · `reports/B4_Implementation_Report.md`
+  - `reports/Reviewer_Pass_Report.md` — M1 + M2 fixes
+  - `reports/Push_Plan.md` — Day 9 deploy preconditions
 - **Demo script:** `docs/DEMO-SCRIPT.md`
 - **Hackathon plan (historical):** `docs/HACKATHON-PLAN.md`
 - **CEO pitch (historical):** `docs/CEO-PITCH-AND-BUDGET.md`

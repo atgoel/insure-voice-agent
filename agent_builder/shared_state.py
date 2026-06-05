@@ -48,6 +48,9 @@ simple LRU. Not in scope for Day 6.
 PROFILE_BY_SESSION: dict = {}
 TOP3_BY_SESSION: dict = {}
 
+# T1-Bug L — Session-specific rendered product IDs to suppress duplicates.
+LAST_RENDERED_BY_SESSION: dict = {}
+
 # T3 — Contact capture state per session.
 # Schema per session:
 #   {"state": "NONE"|"ASKED"|"AWAITING_EMAIL"|"CAPTURED"|"DECLINED",

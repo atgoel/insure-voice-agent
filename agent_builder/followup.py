@@ -40,9 +40,9 @@ _FOLLOWUP_PATTERNS = [
 
 # Ordinal references — "first one", "the second", "third option", "1st product"
 _ORDINAL_PATTERNS = [
-    (re.compile(r"\b(1st|first)\b\s*(one|option|product|plan|choice|recommendation)?"), 0),
-    (re.compile(r"\b(2nd|second)\b\s*(one|option|product|plan|choice|recommendation)?"), 1),
-    (re.compile(r"\b(3rd|third|last)\b\s*(one|option|product|plan|choice|recommendation)?"), 2),
+    (re.compile(r"\b(the\s+)?(1st|first)\s+(one|option|recommendation|card|plan|product|choice)\b|\bthe\s+(1st|first)\s*$"), 0),
+    (re.compile(r"\b(the\s+)?(2nd|second)\s+(one|option|recommendation|card|plan|product|choice)\b|\bthe\s+(2nd|second)\s*$"), 1),
+    (re.compile(r"\b(the\s+)?(3rd|third|last)\s+(one|option|recommendation|card|plan|product|choice)\b|\bthe\s+(3rd|third|last)\s*$"), 2),
 ]
 
 # Reset patterns — must work mid-intake too, so check these very early.
@@ -72,21 +72,20 @@ _COMPARE_PATTERNS = [
 _FUZZY_THRESHOLD = 0.60
 
 
-# ---------------------------------------------------------------------------
-# Mojibake fix (mirrors main.py's _fix_mojibake; duplicated to keep this
-# module a leaf without circular imports). Per L-004 — apply at egress.
-# ---------------------------------------------------------------------------
+_MOJIBAKE_MARKERS = ("â", "Ã", "Â", "â€", "â‚")
+
 
 def _fix_mojibake(s) -> str:
-    if not isinstance(s, str):
+    if not isinstance(s, str) or not s:
+        return s
+    if not any(m in s for m in _MOJIBAKE_MARKERS):
         return s
     try:
-        # If string contains 0x80-0x9F range chars (cp1252 round-trip), fix it.
-        if any(0x80 <= ord(c) <= 0x9F for c in s):
-            return s.encode("cp1252", errors="ignore").decode("utf-8", errors="ignore")
+        return s.encode("cp1252", errors="ignore").decode("utf-8", errors="ignore")
     except Exception:
         pass
     return s
+
 
 
 # ---------------------------------------------------------------------------
@@ -391,13 +390,16 @@ def is_done_intent(message: str) -> bool:
     return any(p.match(cleaned) for p in _DONE_PATTERNS_ANCHORED)
 
 
+CANONICAL_FAREWELL_TEXT = (
+    "Okay, I understand. Thanks for chatting with InsureVoice today. "
+    "If you change your mind or want to explore other options later, just say so. "
+    "Have a great day!"
+)
+
+
 def farewell_voice_text() -> str:
-    """Canonical farewell — no random rotation. Determinism > variety for tests."""
-    return (
-        "Okay, I understand. Thanks for chatting with InsureVoice today. "
-        "If you change your mind or want to explore other options later, just say so. "
-        "Have a great day!"
-    )
+    """Canonical farewell — returns frozen module constant. Determinism > variety for tests."""
+    return CANONICAL_FAREWELL_TEXT
 
 
 # ===========================================================================

@@ -46,7 +46,7 @@ sys.modules.setdefault("elasticsearch", _es_mod)
 class _FakeFastMCP:
     def __init__(self, *a, **kw): pass
     def tool(self): return lambda fn: fn
-    def http_app(self): return MagicMock()
+    def http_app(self, *a, **kw): return MagicMock()
 
 _fastmcp_mod = types.ModuleType("fastmcp")
 _fastmcp_mod.FastMCP = _FakeFastMCP

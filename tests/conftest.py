@@ -9,7 +9,18 @@ Fixtures:
     rejected_products_fixture     — 1-item list with rejection metadata shape
 """
 
+import os
+import sys
 import pytest
+
+# Define default environment variables for testing so importing agent_definition/main succeeds.
+os.environ.setdefault("ELASTIC_MCP_SERVER_URL", "http://mock-elastic-mcp.test/search")
+os.environ.setdefault("ELASTIC_MCP_SERVER_NATIVE_URL", "http://mock-elastic-mcp-native.test/search")
+os.environ.setdefault("COMPLIANCE_CHECK_URL", "http://mock-compliance.test/check")
+os.environ.setdefault("RANK_PRODUCTS_URL", "http://mock-rank.test/rank")
+os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
+os.environ.setdefault("GOOGLE_API_KEY", "stub-key-for-tests")
+
 
 
 @pytest.fixture

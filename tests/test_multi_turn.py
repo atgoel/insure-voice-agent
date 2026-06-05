@@ -77,8 +77,7 @@ class TestMultiTurnFollowUp:
     Second turn: "tell me more about the first one" → no new search/comply/rank calls.
     """
 
-    @pytest.mark.asyncio
-    async def test_follow_up_does_not_retrigger_search(self):
+    def test_follow_up_does_not_retrigger_search(self):
         """
         Verify that a follow-up turn with a session_id does not call
         the search_products wrapper a second time.
