@@ -365,6 +365,15 @@ class VoiceSimulationEngine {
 
         window.logDebug(`[/invoke] POST → message="${text.substring(0, 60)}…" session=${this.invokeSessionId || '(new)'}`, "info");
 
+        // [B-LIVE-1] Patch 1C — DIAGNOSTIC INSTRUMENTATION ONLY (no behaviour change).
+        // Detect FE session-id loss between turns to disambiguate H1 (FE state loss)
+        // vs H2 (server intake-state loss). Remove after Day 9 root-cause confirmed.
+        const sentId = this.invokeSessionId;
+        if (this.hasUserSpokenOnce && (sentId === null || sentId === undefined || sentId === '')) {
+            console.error("[B-LIVE-1] invokeSessionId is empty before /invoke POST — session-id was LOST. This will cause welcome-replay. Stack:", new Error().stack);
+        }
+        console.log("[B-LIVE-1] POST /invoke session=" + sentId + " text='" + text + "' /* TODO Day 9: PII removal */");
+
         const requestBody = { message: text };
         if (this.invokeSessionId) {
             requestBody.session_id = this.invokeSessionId;
@@ -380,6 +389,11 @@ class VoiceSimulationEngine {
                 return res.json();
             })
             .then(data => {
+                // [B-LIVE-1] Patch 1C — flag server returning a different session_id than sent.
+                const gotId = data.session_id;
+                if (sentId && gotId && sentId !== gotId) {
+                    console.warn("[B-LIVE-1] server returned different session_id than sent — sent=" + sentId + " got=" + gotId);
+                }
                 this.invokeSessionId = data.session_id;
                 // Fallback when bot text is empty: if pipeline returned products, point at the cards.
                 // Otherwise the original "didn't catch that" prompt for the user to retry.

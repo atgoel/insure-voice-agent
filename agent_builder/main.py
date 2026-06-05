@@ -330,19 +330,36 @@ async def invoke(body: dict) -> JSONResponse:
     # Day 8 live-test debug instrumentation. Logs the raw inbound message so
     # we can see what STT v2 transcribed AND why intake validators are
     # rejecting (the 59-char "could you repeat" symptom). Remove after fix.
-    try:
-        from shared_state import _INTAKE_BY_SESSION as _IBS_DBG
-        _intake_state_dbg = _IBS_DBG.get(session_id)
-        _next_field = None
-        if _intake_state_dbg is not None and hasattr(_intake_state_dbg, "next_field"):
-            _next_field = _intake_state_dbg.next_field()
-        elif isinstance(_intake_state_dbg, dict):
-            _next_field = _intake_state_dbg.get("_next_field", "?")
-    except Exception:
-        _next_field = "?"
+    # B-LIVE-1 INVOKE_RAW: log even malformed requests (signature is body:dict
+    # so FastAPI 422s before this runs on truly malformed JSON; we log post-parse
+    # to prove the request landed and which session_id it carried).
     _log.info(
-        "INVOKE_IN session=%s next_field=%s msg=%r",
-        session_id[:8], _next_field, message[:200],
+        "INVOKE_RAW session=%s msg_len=%d",
+        session_id[:8], len(message or ""),
+    )
+    # Patch 1A — read directly from the module-local dict at main.py:88.
+    # Phantom `from shared_state import _INTAKE_BY_SESSION` removed (v2-edit 1):
+    # shared_state.py only exports PROFILE_BY_SESSION, TOP3_BY_SESSION,
+    # LAST_RENDERED_BY_SESSION, CONTACT_BY_SESSION. The old re-import always
+    # raised ImportError and produced `next_field=?` in every live log line.
+    # DEBUG-ONLY — remove `msg=%r` PII before non-sandbox deploy.
+    # TODO Day 9: replace `msg=%r` with `msg_len=%d msg_hash=%s`
+    #   (sha256 first 8 chars) once root cause is identified.
+    try:
+        profile = _INTAKE_BY_SESSION.get(session_id, {}).get("profile") or {}
+        _profile_keys = sorted(profile.keys())
+        _intake_complete = (
+            "name" in profile and "age" in profile
+            and "sum_assured" in profile and "family_size" in profile
+        )
+        _next_field = _INTAKE_BY_SESSION.get(session_id, {}).get(
+            "expecting_field", "(none)"
+        )
+    except Exception:
+        _profile_keys, _intake_complete, _next_field = [], False, "(err)"
+    _log.info(
+        "INVOKE_IN session=%s next_field=%s profile_keys=%s complete=%s msg=%r",
+        session_id[:8], _next_field, _profile_keys, _intake_complete, message[:200],
     )
 
     # T1-Bug L — "show me again / repeat" bypass to dedup logic
@@ -413,6 +430,22 @@ async def invoke(body: dict) -> JSONResponse:
     if not intake_state.get("complete"):
         intake_result = handle_intake(intake_state, message.strip())
         if not intake_result.get("complete"):
+            # Patch 1B — INVOKE_OUT_INTAKE log on the early-return intake path.
+            # Existing INVOKE_OUT at main.py:~1192 never fires for intake turns
+            # because this early-return short-circuits before the OUT block.
+            # Without this line, B-LIVE-6 leaves us blind on every intake turn.
+            # DEBUG-ONLY — remove `reply_preview=%r` PII before non-sandbox deploy.
+            # TODO Day 9: replace `reply_preview=%r` with `reply_hash=%s`
+            #   (sha256 first 8 chars) once root cause is identified.
+            try:
+                _reply_text = intake_result.get("agent_says") or ""
+                _expected = intake_state.get("expecting_field", "(none)")
+                _log.info(
+                    "INVOKE_OUT_INTAKE session=%s field=%s reply_len=%d reply_preview=%r",
+                    session_id[:8], _expected, len(_reply_text), _reply_text[:80],
+                )
+            except Exception:
+                pass
             # Still gathering — return next question, skip LLM entirely.
             return JSONResponse(
                 status_code=200,

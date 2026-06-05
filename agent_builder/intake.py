@@ -84,6 +84,11 @@ def validate_name(value: str) -> Tuple[bool, Any]:
     v = _normalise(value)
     # T4 — Bug A: strip conversational prefixes BEFORE length/character checks
     v = _strip_name_prefix(v)
+    # B-LIVE-4 (Day 8 live-test fix): STT v2 emits trailing punctuation on
+    # utterance boundary ("My name is Abhishek." -> "Abhishek."). Strip after
+    # prefix-stripping so internal periods (e.g. "Mary J. Smith") survive,
+    # but a single trailing period/comma/exclam/question/whitespace is removed.
+    v = re.sub(r"[\.,!?\s]+$", "", v)
     if not v:
         return False, "Sorry, I didn't catch that — what's your name?"
     if len(v) < 2 or len(v) > 50:
@@ -115,6 +120,16 @@ _AMBIGUOUS_SMOKER_PHRASES = (
     "don't know", "dont know", "do not know", "not sure", "unsure",
     "no idea", "maybe", "i think", "kind of", "sort of", "sometimes",
     "i guess", "uncertain", "hmm",
+)
+
+
+# B-LIVE-3 (Day 8 live-test fix): family-relationship phrases that signal a
+# family shape but DO NOT carry an explicit count. Used by validate_family_size
+# to acknowledge the family signal and re-prompt for the number specifically.
+_FAMILY_SHAPE_WORDS = (
+    "family", "spouse", "wife", "husband", "kid", "kids", "child", "children",
+    "parent", "parents", "mom", "dad", "father", "mother", "sibling",
+    "me and my",
 )
 
 
@@ -200,11 +215,20 @@ def validate_health_status(value: str) -> Tuple[bool, Any]:
     v = _normalise(value).lower()
     if not v:
         return False, "Are you in good health, or do you have any pre-existing conditions?"
+    # Strong pre-existing signals — explicit conditions or affirmations of having one.
+    # pre_words check runs FIRST so "I'm fine but I have diabetes" still routes here.
     pre_words = {"pre-existing", "pre existing", "preexisting", "diabetes", "blood pressure",
                  "hypertension", "heart", "cancer", "asthma", "thyroid", "cholesterol",
                  "yes i have", "have a condition", "have conditions", "diabetic"}
-    healthy_words = {"healthy", "fit", "fine", "no condition", "no pre", "nothing",
-                     "all good", "perfect health", "no issues", "no problems", "none"}
+    # B-LIVE-2 (Day 8 live-test fix): healthy signals — contextual phrases only.
+    # NO standalone adjectives like "perfectly" (would match "perfectly comfortable
+    # [with my diabetes]"). Day 8 live additions: "good health", "in good health",
+    # "perfectly fine", "completely fine", "no conditions", "no issues", "no problems".
+    healthy_words = {"healthy", "fit", "fine", "no condition", "no conditions", "no pre",
+                     "nothing", "all good", "perfect health", "perfectly fine",
+                     "completely fine", "no issues", "no issue", "no problems",
+                     "no problem", "none", "good health", "in good health",
+                     "no diabetes", "no bp", "no blood pressure"}
     if any(w in v for w in pre_words):
         return True, "pre_existing"
     if any(w in v for w in healthy_words):
@@ -216,18 +240,28 @@ def validate_family_size(value: str) -> Tuple[bool, Any]:
     v = _normalise(value).lower()
     if not v:
         return False, "How many family members would you like covered, including yourself?"
+    # T1 — number-word path (preferred when an exact count is signalled).
     word_to_num = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-                   "seven": 7, "eight": 8, "nine": 9, "ten": 10, "myself": 1, "just me": 1, "alone": 1}
+                   "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                   "myself": 1, "just me": 1, "alone": 1}
     for w, n in word_to_num.items():
         if w in v:
             return True, n
+    # T2 — numeric digit path.
     m = re.search(r"\d+", v)
-    if not m:
-        return False, "Could you say the family size as a number? Like '4'."
-    size = int(m.group())
-    if size < 1 or size > 10:
-        return False, "Family size needs to be between 1 and 10. Could you double-check?"
-    return True, size
+    if m:
+        size = int(m.group())
+        if size < 1 or size > 10:
+            return False, "Family size needs to be between 1 and 10. Could you double-check?"
+        return True, size
+    # T3 — B-LIVE-3 (Day 8 live-test fix): family-relationship language without a
+    # count. Acknowledge the family signal and ask explicitly for the number,
+    # rather than the cold "Could you say the family size as a number?" reprompt.
+    if any(w in v for w in _FAMILY_SHAPE_WORDS):
+        return False, ("Got it, you'd like to cover your family. "
+                       "How many people in total — including yourself? "
+                       "You can just say a number like 'three' or '4'.")
+    return False, "Could you say the family size as a number? Like '4'."
 
 
 def validate_coverage_goals(value: str) -> Tuple[bool, Any]:
