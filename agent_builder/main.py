@@ -327,6 +327,24 @@ async def invoke(body: dict) -> JSONResponse:
     session_id: str = body.get("session_id") or str(uuid.uuid4())
     user_id: str = body.get("user_id") or "voice-user"
 
+    # Day 8 live-test debug instrumentation. Logs the raw inbound message so
+    # we can see what STT v2 transcribed AND why intake validators are
+    # rejecting (the 59-char "could you repeat" symptom). Remove after fix.
+    try:
+        from shared_state import _INTAKE_BY_SESSION as _IBS_DBG
+        _intake_state_dbg = _IBS_DBG.get(session_id)
+        _next_field = None
+        if _intake_state_dbg is not None and hasattr(_intake_state_dbg, "next_field"):
+            _next_field = _intake_state_dbg.next_field()
+        elif isinstance(_intake_state_dbg, dict):
+            _next_field = _intake_state_dbg.get("_next_field", "?")
+    except Exception:
+        _next_field = "?"
+    _log.info(
+        "INVOKE_IN session=%s next_field=%s msg=%r",
+        session_id[:8], _next_field, message[:200],
+    )
+
     # T1-Bug L — "show me again / repeat" bypass to dedup logic
     _msg_lower = message.strip().lower()
     if any(w in _msg_lower for w in ("again", "repeat", "show me", "once more")):
@@ -1168,6 +1186,18 @@ async def invoke(body: dict) -> JSONResponse:
     if _has_pipeline_call and not _suppress_card_render:
         response_payload["top3"] = top3_enriched
         response_payload["rejected"] = rejected_with_reason
+
+    # Day 8 debug: log outbound response shape so we can see what the agent
+    # is actually saying back. Remove after fix lands.
+    try:
+        _resp_text = (response_payload.get("response") or "")[:200]
+        _log.info(
+            "INVOKE_OUT session=%s len=%d has_top3=%s resp=%r",
+            session_id[:8], len(_resp_text),
+            "top3" in response_payload, _resp_text,
+        )
+    except Exception:
+        pass
 
     return JSONResponse(content=response_payload, status_code=200)
 
