@@ -88,8 +88,13 @@ except Exception as _e:  # pragma: no cover - exercised only when SDK absent
 # ---------------------------------------------------------------------------
 
 _GCP_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "voice-sales-agent")
-# Inline ``_`` recognizer to avoid pre-creating per-deploy recognizer resources.
-_RECOGNIZER = f"projects/{_GCP_PROJECT}/locations/global/recognizers/_"
+# REGIONAL endpoint required for chirp_2 — the model is NOT available in
+# locations/global. Day 8 live-test discovery (rev 00032-lmm StreamingRecognize
+# returned: InvalidArgument 'The model "chirp_2" does not exist in the location
+# named "global"'). Switching to us-central1 keeps chirp_2 available.
+_GCP_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+_RECOGNIZER = f"projects/{_GCP_PROJECT}/locations/{_GCP_LOCATION}/recognizers/_"
+_SPEECH_API_ENDPOINT = f"{_GCP_LOCATION}-speech.googleapis.com"
 
 _SAMPLE_RATE_HZ = 16000
 _CHANNELS = 1
@@ -127,8 +132,15 @@ async def _get_speech_client() -> Optional["SpeechAsyncClient"]:
         return _speech_client
     async with _speech_client_lock:
         if _speech_client is None:
-            _speech_client = SpeechAsyncClient()
-            _log.info("[STT] SpeechAsyncClient initialized (project=%s)", _GCP_PROJECT)
+            # Regional endpoint required for chirp_2 (not available in global).
+            from google.api_core.client_options import ClientOptions
+            _speech_client = SpeechAsyncClient(
+                client_options=ClientOptions(api_endpoint=_SPEECH_API_ENDPOINT),
+            )
+            _log.info(
+                "[STT] SpeechAsyncClient initialized (project=%s, endpoint=%s, recognizer=%s)",
+                _GCP_PROJECT, _SPEECH_API_ENDPOINT, _RECOGNIZER,
+            )
     return _speech_client
 
 
