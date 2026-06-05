@@ -108,7 +108,16 @@ _SPEECH_END_TIMEOUT_NANOS = 800_000_000  # 800 ms
 
 # Stream lifecycle bounds.
 _GRPC_STREAM_MAX_S = 290  # 4 min 50 s — well under Google's 5 min hard cap
-_WS_IDLE_TIMEOUT_S = 30  # close WS if zero audio frames received
+_WS_IDLE_TIMEOUT_S = 180  # long-lived stream: the idle clock is CONTINUOUS
+                          # across turns (no per-turn WS teardown), and muted-
+                          # during-TTS windows send ZERO binary frames — a long
+                          # TTS reply + think-time can span tens of seconds with
+                          # no frames. 30s killed the stream mid-conversation;
+                          # the 15s FE silence nudge fires TTS (still no STT
+                          # frames) so it does NOT reset this clock. 180s clears
+                          # back-to-back long replies + think-time while staying
+                          # safely under the 290s gRPC rollover ceiling
+                          # (_GRPC_STREAM_MAX_S), which refreshes independently.
 _AUDIO_QUEUE_MAX = 64  # backpressure ceiling (~2 s of 30 ms frames)
 
 # Backpressure log throttle (B2 SPEC v2 §13.3).

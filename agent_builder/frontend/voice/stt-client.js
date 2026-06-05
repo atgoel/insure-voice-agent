@@ -109,6 +109,22 @@
                 let resolved = false;
                 let readyReceived = false;
 
+                // Change 5 (InvB resilience): if the server accepts the WS but
+                // never sends {type:"ready"}, the promise would hang forever and
+                // `state` would stay CONNECTING, wedging every future start()
+                // (the :342 guard early-returns on CONNECTING). In the long-lived
+                // design there's no per-turn rebuild to paper over this. Reject
+                // after 5s, reset state→IDLE so a later start() can retry, and
+                // close the half-open socket.
+                const readyTimer = setTimeout(() => {
+                    if (!resolved) {
+                        resolved = true;
+                        state = 'IDLE';
+                        try { s.close(4000, 'ready_timeout'); } catch (_) {}
+                        reject(new Error('STT ready not received within 5s'));
+                    }
+                }, 5000);
+
                 s.onopen = () => {
                     _logDbg('[STT WS] open — sending config', 'info');
                     try {
@@ -137,6 +153,7 @@
                     }
                     if (!readyReceived && msg.type === 'ready') {
                         readyReceived = true;
+                        clearTimeout(readyTimer);
                         if (msg.session_id) {
                             sessionId = msg.session_id;
                         }
@@ -153,6 +170,7 @@
                 };
 
                 s.onerror = (ev) => {
+                    clearTimeout(readyTimer);
                     _logDbg('[STT WS] error: ' + (ev && ev.message ? ev.message : '(no detail)'), 'warning');
                     if (!resolved) {
                         resolved = true;
@@ -161,6 +179,7 @@
                 };
 
                 s.onclose = (ev) => {
+                    clearTimeout(readyTimer);
                     _logDbg(`[STT WS] closed code=${ev.code} reason=${ev.reason}`, 'info');
                     const wasOpen = (ws === s);
                     ws = null;
@@ -206,6 +225,14 @@
         function _routeServerMessage(msg) {
             switch (msg.type) {
                 case 'event':
+                    if (muteSTTOutput) {
+                        // D9 echo-hole fix: with the long-lived mic live across
+                        // turns, TTS-bleed (or room echo before suspend() fully
+                        // takes) can yield a SPEECH_ACTIVITY_BEGIN that resets the
+                        // FE wrap-up silence timer mid-TTS. Gate it like interim/
+                        // final so VAD events are suppressed while muted.
+                        return;
+                    }
                     if (cfg.onActivity) {
                         try { cfg.onActivity(msg.event); } catch (_) {}
                     }

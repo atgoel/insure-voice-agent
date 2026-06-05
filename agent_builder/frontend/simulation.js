@@ -69,14 +69,16 @@ class VoiceSimulationEngine {
                 const speechOutput = (text || '').trim();
                 if (!speechOutput) return;
                 this.accumulatedTranscript = '';
-                // Await teardown so the AudioContext + MediaStream are fully closed
-                // BEFORE the next /invoke -> speak() -> startListening() chain runs.
-                // Without this, Turn-2's `new WebSocket()` races Turn-1's audioCtx.close()
-                // and Chrome rejects the second WS construction with code 1006.
-                this.stopListening().then(() => {
-                    window.addTranscriptBubble('USER', speechOutput);
-                    this.processInputText(speechOutput);
-                });
+                // Strategy 2: do NOT tear down the WS/mic/gRPC. Soft-pause (mute)
+                // so any trailing user speech or the upcoming TTS can't re-trigger
+                // STT; the stream stays OPEN for the whole conversation. speak() ->
+                // voice-player onplay suspends the ctx; onended resumes + the
+                // processInputText .then re-arm re-enables the silence timer.
+                // (The old stopListening()/rebuild-per-turn caused the turn-3 dead
+                // mic — there is no second `new WebSocket()` race anymore.)
+                this.pauseListening();
+                window.addTranscriptBubble('USER', speechOutput);
+                this.processInputText(speechOutput);
             },
             onError: (code, detail) => {
                 window.logDebug(`[STT Error] ${code}: ${detail}`, "warning");
@@ -117,21 +119,27 @@ class VoiceSimulationEngine {
         // so the client only needs one timer: nudge once, then wrap up.
         this.postRecSilenceTimerId = setTimeout(() => {
             this.silenceStrikeCount++;
-            this.stopListening();
 
             let prompt = "";
             if (this.silenceStrikeCount === 1) {
+                // Strike 1: soft pause (mute + clear timers), stream stays OPEN;
+                // the nudge TTS's onended -> startListening() re-arms a fresh timer.
+                this.pauseListening();
                 prompt = "Anything else I can help with? Otherwise I'll wrap up here.";
             } else {
-                prompt = "Thank you so much for exploring options with InsureVoice. Goodbye!";
+                // Strike 2: true session end. sessionEnded set BEFORE the prompt so
+                // startSilenceTimer's guard won't re-arm; hard teardown happens in
+                // the TTS callback below.
                 this.sessionEnded = true;
+                prompt = "Thank you so much for exploring options with InsureVoice. Goodbye!";
             }
 
             window.addTranscriptBubble('AGENT', prompt);
             this.speak(prompt, () => {
                 if (this.silenceStrikeCount === 1) {
-                    this.startListening();
+                    this.startListening();          // idempotent re-arm (stream still OPEN)
                 } else {
+                    this.stopListening();           // HARD teardown at true session end
                     window.updateVoiceState('IDLE');
                     const core = document.querySelector('.voice-orb-core');
                     if (core) {
@@ -152,19 +160,29 @@ class VoiceSimulationEngine {
 
     async startListening() {
         if (!this.sttClient) return;
-        if (this.isPlayingVoice) return;
+        if (this.isPlayingVoice) return;   // never re-arm mid-TTS
         if (this.sessionEnded) return;
-        if (this.shouldBeListening && this.sttActive) return;  // already armed
 
         this.shouldBeListening = true;
         window.updateVoiceState('LISTENING');
         this.accumulatedTranscript = '';
 
+        // Belt-and-suspenders unmute. voice-player's onended already cleared
+        // __voiceMicSuspended before this runs (it resolves playTTS first); this
+        // is idempotent and also covers the _speakBrowser fallback path where
+        // voice-player never ran. Do NOT treat this as the canonical unmute —
+        // voice-player owns that; this must not race it (it runs strictly after).
+        try { this.sttClient.setMuted(false); } catch (_) {}
+
+        // Stream already live (turns 2+): just re-arm the silence timer, do NOT
+        // rebuild the WS/mic/gRPC. sttActive alone is the "is the stream live?"
+        // signal — dropped the old `shouldBeListening && sttActive` combined guard.
         if (this.sttActive) {
             this.startSilenceTimer();
             return;
         }
 
+        // FIRST turn only: open mic + WS + gRPC exactly once.
         try {
             this.sttClient.setSessionId(this.invokeSessionId);
             await this.sttClient.start({ session_id: this.invokeSessionId });
@@ -172,10 +190,24 @@ class VoiceSimulationEngine {
             this.startSilenceTimer();
         } catch (e) {
             console.warn("[STT] Start exception:", e);
+            this.sttActive = false;   // reset so a later turn can retry the open
             this.startSilenceTimer();
         }
     }
 
+    // Soft pause: mute + clear timers, leave WS+mic+gRPC ALIVE. Used between
+    // turns (onFinal), by silence-timer strike 1, and by the mute button (app.js).
+    // Re-armable via the now-idempotent startListening().
+    pauseListening() {
+        this.shouldBeListening = false;
+        this.clearSilenceTimers();
+        if (this.sttClient && this.sttActive) {
+            try { this.sttClient.setMuted(true); } catch (e) { console.warn("[STT] Mute exception:", e); }
+        }
+    }
+
+    // Hard stop: full teardown of WS+mic+gRPC. Used ONLY at true session end
+    // (silence strike 2 / sessionEnded) and page unload. NOT between turns.
     async stopListening() {
         this.shouldBeListening = false;
         this.clearSilenceTimers();
