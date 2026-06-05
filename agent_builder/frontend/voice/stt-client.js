@@ -342,6 +342,16 @@
             if (state === 'OPEN' || state === 'CONNECTING') {
                 return;
             }
+            if (state === 'CLOSING') {
+                // Wait briefly for an in-flight stop() to finish; if still CLOSING,
+                // surface a soft error so the caller can retry.
+                for (let i = 0; i < 20 && state === 'CLOSING'; i++) {
+                    await new Promise((r) => setTimeout(r, 50));
+                }
+                if (state === 'CLOSING') {
+                    throw new Error('STT still closing - retry shortly');
+                }
+            }
             opts = opts || {};
             if (opts.session_id) {
                 sessionId = opts.session_id;

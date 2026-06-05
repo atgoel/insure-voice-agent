@@ -287,11 +287,6 @@ steps:
         COMPLIANCE_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/compliance_check"
         RANK_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/rank_products"
 
-        # Day 8 (2026-06-05): --no-traffic is the safe default. New revisions
-        # are deployed but DO NOT receive any traffic until manually promoted via
-        # `gcloud run services update-traffic`. Live revision keeps serving 100%
-        # until smoke-test PASS. This prevents broken revisions from going live
-        # mid-build. Per Locked_Decisions D8 deploy strategy.
         gcloud run deploy insure-voice-agent \
           --image=gcr.io/$PROJECT_ID/insure-voice-agent \
           --platform=managed \
@@ -300,23 +295,13 @@ steps:
           --port=8080 \
           --min-instances=1 \
           --max-instances=1 \
-          --no-traffic \
-          --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,ELASTIC_MCP_SERVER_NATIVE_URL=$$MCP_NATIVE_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,SIMULATE_PREMIUM_URL=$$SIMULATE_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}"
+          --set-env-vars="ELASTIC_MCP_SERVER_URL=$$MCP_URL,ELASTIC_MCP_SERVER_NATIVE_URL=$$MCP_NATIVE_URL,COMPLIANCE_CHECK_URL=$$COMPLIANCE_URL,RANK_PRODUCTS_URL=$$RANK_URL,SIMULATE_PREMIUM_URL=$$SIMULATE_URL,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION},USE_LLM_INTENT_CLASSIFIER=true"
 
-        # Capture the NEW revision URL (not the service URL — that still
-        # routes to the live revision). The new revision URL has the form:
-        #   https://insure-voice-agent--<rev-name>-<hash>-uc.a.run.app
         AGENT_URL=$$(gcloud run services describe insure-voice-agent \
           --region=${_REGION} --format='value(status.url)')
-        NEW_REV=$$(gcloud run services describe insure-voice-agent \
-          --region=${_REGION} --format='value(status.latestCreatedRevisionName)')
-        echo "InsureVoice Agent Runner (live URL, still serving previous rev):"
-        echo "  $$AGENT_URL"
-        echo "New revision deployed (NOT receiving traffic yet):"
-        echo "  $$NEW_REV"
-        echo "To promote: gcloud run services update-traffic insure-voice-agent --region=${_REGION} --to-revisions=$$NEW_REV=100"
+        echo "InsureVoice Agent Runner: $$AGENT_URL"
+        echo "  Invoke: $$AGENT_URL/invoke"
         echo -n "$$AGENT_URL" > /workspace/agent_url.txt
-        echo -n "$$NEW_REV" > /workspace/new_revision.txt
 
   # ---------------------------------------------------------------------------
   # Step 7: Print deployment summary — all service URLs for reference

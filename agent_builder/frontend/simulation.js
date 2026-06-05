@@ -69,9 +69,14 @@ class VoiceSimulationEngine {
                 const speechOutput = (text || '').trim();
                 if (!speechOutput) return;
                 this.accumulatedTranscript = '';
-                this.stopListening();   // tear down mic; will reopen post-TTS
-                window.addTranscriptBubble('USER', speechOutput);
-                this.processInputText(speechOutput);
+                // Await teardown so the AudioContext + MediaStream are fully closed
+                // BEFORE the next /invoke -> speak() -> startListening() chain runs.
+                // Without this, Turn-2's `new WebSocket()` races Turn-1's audioCtx.close()
+                // and Chrome rejects the second WS construction with code 1006.
+                this.stopListening().then(() => {
+                    window.addTranscriptBubble('USER', speechOutput);
+                    this.processInputText(speechOutput);
+                });
             },
             onError: (code, detail) => {
                 window.logDebug(`[STT Error] ${code}: ${detail}`, "warning");
@@ -149,6 +154,7 @@ class VoiceSimulationEngine {
         if (!this.sttClient) return;
         if (this.isPlayingVoice) return;
         if (this.sessionEnded) return;
+        if (this.shouldBeListening && this.sttActive) return;  // already armed
 
         this.shouldBeListening = true;
         window.updateVoiceState('LISTENING');
