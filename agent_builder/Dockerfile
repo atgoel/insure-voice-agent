@@ -23,6 +23,10 @@ COPY intake.py .
 # Day 6 — S2'/S3 module-level session-state dicts + S3 follow-up state machine
 COPY shared_state.py .
 COPY followup.py .
+# Day 8 — Tier B voice-stack modules (B1 TTS, B2 STT, B4 intent classifier)
+COPY tts_streaming.py .
+COPY stt_websocket.py .
+COPY intent_classifier.py .
 
 # Bundle frontend (copied in by Cloud Build step copy-frontend-agent before this image builds)
 COPY frontend ./frontend
