@@ -16,14 +16,21 @@
  *                                     Written by B1 ONLY during onplay/onended
  *                                     transitions; B2 inits it on STT start.
  *
- * Cross-spec contracts honored (Locked Decisions D8, B1 SPEC v2 §5.1):
- *   <audio>.onplay   → __voiceAudioCtx.suspend() + __voiceMicSuspended=true
- *                      + window.updateVoiceState('SPEAKING')
- *   <audio>.onended  → setTimeout(200ms) → __voiceAudioCtx.resume()
- *                      + __voiceMicSuspended=false
- *                      + window.updateVoiceState('IDLE') + callback()
- *   <audio>.onerror  → same recovery path as onended (NEVER leave mic
- *                      suspended on error — would soft-brick conversation)
+ * Cross-spec contracts (Locked Decisions D8, B1 SPEC v2 §5.1):
+ *   <audio>.onplay   → __voiceMicSuspended=true + updateVoiceState('SPEAKING')
+ *   <audio>.onended  → setTimeout(200ms) → __voiceMicSuspended=false
+ *                      + updateVoiceState('IDLE') + callback()
+ *   <audio>.onerror  → same recovery path as onended (NEVER leave mic gated
+ *                      on error — would soft-brick conversation)
+ *
+ * DEAD-MIC FIX (2026-06-06): the original design ALSO called
+ * __voiceAudioCtx.suspend()/resume() around playback. REMOVED — Chrome does
+ * not reliably resume an AudioWorklet fed by a getUserMedia stream after
+ * suspend()→resume(); the worklet stops pumping and the mic goes deaf after
+ * the first TTS (ctx reports 'running', track 'live', but zero frames). Echo
+ * protection is fully preserved by the __voiceMicSuspended flag (stt-client.js
+ * drops frames while true) + getUserMedia echoCancellation. The ctx now runs
+ * continuously; only the flag gates frames.
  *
  * Streaming model: MediaSource + 'audio/mpeg'. MP3 is universally supported
  * by modern Chrome/Edge MSE (MP3 is mandatory in the HTML spec MIME map).
@@ -302,20 +309,19 @@
         _wireAudioLifecycle(audio, opts, finish) {
             audio.onplay = async () => {
                 this.isPlaying = true;
-                // §5.1 — synchronous-ish flag flip BEFORE awaiting suspend(),
-                // so any STT result handler racing in sees the right state.
+                // DEAD-MIC FIX (2026-06-06): set the mute FLAG only — do NOT
+                // suspend the AudioContext. Chrome does not reliably resume an
+                // AudioWorklet fed by a getUserMedia stream after suspend()→
+                // resume(); the worklet's process() pump silently stops, so the
+                // mic goes deaf after the first TTS even though ctx reports
+                // 'running' and the track is 'live' (confirmed via [STT UNMUTE]
+                // diag). Echo protection is FULLY preserved by muteSTTOutput
+                // (stt-client.js:339 drops every frame while __voiceMicSuspended
+                // is true) + getUserMedia echoCancellation:true. The ctx stays
+                // running continuously → worklet never stops → mic never deaf.
                 window.__voiceMicSuspended = true;
                 if (typeof window.updateVoiceState === 'function') {
                     try { window.updateVoiceState('SPEAKING'); } catch (e) { /* ignore */ }
-                }
-                try {
-                    if (window.__voiceAudioCtx
-                        && window.__voiceAudioCtx.state === 'running'
-                        && typeof window.__voiceAudioCtx.suspend === 'function') {
-                        await window.__voiceAudioCtx.suspend();
-                    }
-                } catch (err) {
-                    console.warn('[VoicePlayer] AudioContext.suspend() failed:', err);
                 }
                 if (typeof opts.onstart === 'function') {
                     try { opts.onstart(); } catch (e) { /* ignore */ }
@@ -324,18 +330,12 @@
 
             audio.onended = () => {
                 this.isPlaying = false;
-                // 200 ms echo-tail per §5.1 — discard the trailing room
-                // acoustic decay before re-arming the mic.
-                setTimeout(async () => {
-                    try {
-                        if (window.__voiceAudioCtx
-                            && window.__voiceAudioCtx.state === 'suspended'
-                            && typeof window.__voiceAudioCtx.resume === 'function') {
-                            await window.__voiceAudioCtx.resume();
-                        }
-                    } catch (err) {
-                        console.warn('[VoicePlayer] AudioContext.resume() failed:', err);
-                    }
+                // 200 ms echo-tail — discard trailing room acoustic decay before
+                // re-opening the mic gate. DEAD-MIC FIX: only clear the mute flag
+                // (ctx was never suspended, so no resume needed). The worklet has
+                // been pumping the whole time; muteSTTOutput=false simply lets its
+                // frames through again.
+                setTimeout(() => {
                     window.__voiceMicSuspended = false;
                     if (typeof window.updateVoiceState === 'function') {
                         try { window.updateVoiceState('IDLE'); } catch (e) { /* ignore */ }
@@ -347,17 +347,9 @@
             audio.onerror = (ev) => {
                 console.error('[TTS] audio playback error:', ev && audio.error);
                 this.isPlaying = false;
-                // Same recovery as onended — never leave mic suspended.
-                setTimeout(async () => {
-                    try {
-                        if (window.__voiceAudioCtx
-                            && window.__voiceAudioCtx.state === 'suspended'
-                            && typeof window.__voiceAudioCtx.resume === 'function') {
-                            await window.__voiceAudioCtx.resume();
-                        }
-                    } catch (err) {
-                        console.warn('[VoicePlayer] AudioContext.resume() (onerror) failed:', err);
-                    }
+                // Same recovery as onended — clear the mute gate (no ctx resume
+                // needed; ctx was never suspended). NEVER leave mic gated on error.
+                setTimeout(() => {
                     window.__voiceMicSuspended = false;
                     if (typeof window.updateVoiceState === 'function') {
                         try { window.updateVoiceState('IDLE'); } catch (e) { /* ignore */ }
@@ -384,15 +376,9 @@
                 }
             } catch (e) { /* ignore */ }
             this._teardown();
-            // Resume mic immediately on a hard stop so STT isn't soft-bricked.
+            // Clear the mic gate immediately on a hard stop so STT isn't soft-
+            // bricked. DEAD-MIC FIX: flag only — ctx is never suspended now.
             window.__voiceMicSuspended = false;
-            try {
-                if (window.__voiceAudioCtx
-                    && window.__voiceAudioCtx.state === 'suspended'
-                    && typeof window.__voiceAudioCtx.resume === 'function') {
-                    window.__voiceAudioCtx.resume();
-                }
-            } catch (e) { /* ignore */ }
         }
 
         _teardown() {

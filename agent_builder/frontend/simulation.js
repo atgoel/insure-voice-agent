@@ -160,19 +160,24 @@ class VoiceSimulationEngine {
 
     async startListening() {
         if (!this.sttClient) return;
-        if (this.isPlayingVoice) return;   // never re-arm mid-TTS
         if (this.sessionEnded) return;
+
+        // UNMUTE FIRST (2026-06-06 dead-mic fix). The worklet drops EVERY audio
+        // frame while muteSTTOutput is true (stt-client.js:339), so the mic is
+        // deaf until this clears. Previously this lived AFTER the `isPlayingVoice`
+        // early-return below — so if a strike-1 nudge's speak() had re-set
+        // isPlayingVoice=true, startListening() returned before unmuting and the
+        // mic stayed dead for the rest of the turn (observed: "not a smoker" never
+        // reached the server). Unmuting is always safe; only TIMER-arming must
+        // wait for TTS to finish. This also covers the _speakBrowser fallback
+        // path where voice-player's onended never runs.
+        try { this.sttClient.setMuted(false); } catch (_) {}
+
+        if (this.isPlayingVoice) return;   // never ARM THE SILENCE TIMER mid-TTS
 
         this.shouldBeListening = true;
         window.updateVoiceState('LISTENING');
         this.accumulatedTranscript = '';
-
-        // Belt-and-suspenders unmute. voice-player's onended already cleared
-        // __voiceMicSuspended before this runs (it resolves playTTS first); this
-        // is idempotent and also covers the _speakBrowser fallback path where
-        // voice-player never ran. Do NOT treat this as the canonical unmute —
-        // voice-player owns that; this must not race it (it runs strictly after).
-        try { this.sttClient.setMuted(false); } catch (_) {}
 
         // Stream already live (turns 2+): just re-arm the silence timer, do NOT
         // rebuild the WS/mic/gRPC. sttActive alone is the "is the stream live?"

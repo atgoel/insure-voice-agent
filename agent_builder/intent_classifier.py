@@ -128,6 +128,26 @@ def _force_classifier_tool(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
 ) -> None:
+    # LOOP GUARD (2026-06-06): if classify_followup_intent has ALREADY produced a
+    # function_response in this request's contents, classification is done —
+    # switch to AUTO so the model emits a final text response and the classifier
+    # runner terminates. Without this, mode=ANY forces the tool on EVERY model
+    # turn → the same unbounded-force loop as the root agent (lesson L-001). This
+    # is the classifier-side (hazard #2) counterpart to the root callback latch.
+    try:
+        for _c in (getattr(llm_request, "contents", None) or []):
+            for _p in (getattr(_c, "parts", None) or []):
+                _fr = getattr(_p, "function_response", None)
+                if _fr is not None and getattr(_fr, "name", None) == "classify_followup_intent":
+                    if llm_request.config is None:
+                        llm_request.config = genai_types.GenerateContentConfig()
+                    llm_request.config.tool_config = genai_types.ToolConfig(
+                        function_calling_config=genai_types.FunctionCallingConfig(mode="AUTO")
+                    )
+                    return
+    except Exception:
+        pass
+
     # 1. Force tool_config.mode=ANY on the classify_followup_intent tool.
     #    Use exact pattern from agent_definition.py:487-496.
     try:
@@ -436,6 +456,13 @@ async def classify_intent_async(
         parts=[genai_types.Part(text=user_message.strip())],
     )
 
+    # Event cap (2026-06-06 backstop): classify is 1 forced tool-call + 1 final
+    # response → a handful of events. If the loop-guard above ever fails to land
+    # (ADK version drift in contents shape), this hard cap prevents the classifier
+    # runner from looping unbounded and hanging the follow-up turn. Break → the
+    # extractor below sees no result → returns None → route = FALLBACK_LLM → the
+    # follow-up arm's deterministic bounce (main.py Fix C). No loop, bounded.
+    _CLF_MAX_EVENTS = 12
     events: list = []
     try:
         async for ev in _classifier_runner.run_async(
@@ -444,6 +471,15 @@ async def classify_intent_async(
             new_message=user_content,
         ):
             events.append(ev)
+            if len(events) > _CLF_MAX_EVENTS:
+                try:
+                    _log.getLogger(__name__).warning(
+                        "CLF_EVENT_CAP session=%s — breaking classifier loop after %d events",
+                        str(session_id)[:8], len(events),
+                    )
+                except Exception:
+                    pass
+                break
     except Exception as _e:
         try:
             _log.getLogger(__name__).exception(

@@ -63,7 +63,7 @@ from agent_definition import root_agent, search_products, compliance_check, rank
 from intake import handle_intake, build_synthetic_message
 
 # B2 — Speech-to-Text v2 streaming WebSocket bridge.
-from stt_websocket import stt_stream_handler
+from stt_websocket import stt_stream_handler, prewarm_speech_client
 
 # B4 — separate-sub-agent intent classifier (D3 lock).
 # NOT a tool on root_agent. Has own LlmAgent + own Runner under separate app_name (D10 lock).
@@ -286,6 +286,14 @@ app = FastAPI(
     ),
     version="1.0",
 )
+
+
+@app.on_event("startup")
+async def _startup_prewarm() -> None:
+    """Pre-warm the STT SpeechAsyncClient so the first /stt/stream handshake
+    doesn't pay the ~3.6s cold-init inside the FE ready-timeout window
+    (2026-06-06 Layer-4 ready_timeout fix). Best-effort; never blocks boot."""
+    await prewarm_speech_client()
 
 
 @app.get("/health")
@@ -823,12 +831,32 @@ async def invoke(body: dict) -> JSONResponse:
     # Audit data collected from tool function_response events (Constitution §IV)
     _tool_results: dict = {}
     response_text = ""
+    # LOOP BACKSTOP (2026-06-06, non-negotiable): the ADK runner is a `while True`
+    # that only terminates when the model emits a pure-text final response. A
+    # before_model_callback that force-calls tools (mode=ANY) can prevent that
+    # indefinitely (the 72.9s recommendation loop / >150s follow-up loop that
+    # burned tokens for 2.5min even after client disconnect). The logic fixes
+    # (callback latch + follow-up short-circuit) remove the known causes, but a
+    # circuit breaker MUST exist so no future regression can ever loop again.
+    # Happy path is ~8-10 events; 24 is generous headroom. On trip, break and let
+    # the existing programmatic-completion + deterministic-template fallback below
+    # produce the answer from the validated profile.
+    _MAX_AGENT_EVENTS = 24
+    _event_count = 0
     try:
         async for event in _runner.run_async(
             user_id=user_id,
             session_id=session_id,
             new_message=user_content,
         ):
+            _event_count += 1
+            if _event_count > _MAX_AGENT_EVENTS:
+                _log.error(
+                    "AGENT_LOOP_BACKSTOP session=%s aborting after %d events "
+                    "(runaway tool-forcing loop) — falling through to deterministic template",
+                    session_id[:8], _event_count,
+                )
+                break
             # Stability C.2 — structured trace of every agent event for debugging.
             # PII-safe: emits tool names, arg KEYS only (not values), and response
             # COUNTS (not full objects). Wrapped in try so trace failures never

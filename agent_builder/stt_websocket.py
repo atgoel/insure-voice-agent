@@ -108,6 +108,19 @@ _SPEECH_END_TIMEOUT_NANOS = 800_000_000  # 800 ms
 
 # Stream lifecycle bounds.
 _GRPC_STREAM_MAX_S = 290  # 4 min 50 s — well under Google's 5 min hard cap
+
+# B2 starvation fix (Day 9): Google STT v2 aborts a streaming_recognize call
+# with Aborted('Stream timed out after receiving no more client requests.')
+# when no audio-bearing request arrives for ~10s (matches _SPEECH_START_TIMEOUT_S).
+# During muted-TTS windows and user think-time the audio queue is empty, so we
+# feed digital-silence frames to keep Google's request stream warm. Empirically
+# confirmed: stopping frames aborts at ~10.6s; continuous silence survives 18s+.
+# Silence (zero-filled PCM) produces no transcript and cannot arm a VAD END
+# (end-timeout only arms after a BEGIN, which silence never triggers).
+_SILENCE_FRAME = bytes(960)        # 30 ms @ 16 kHz mono Int16 LE (480 samples)
+_KEEPALIVE_GET_TIMEOUT_S = 1.0     # poll the queue every 1s; ~10x margin vs 10s abort
+_MAX_RECONNECTS_PER_SESSION = 3    # bound gRPC reconnects so a genuine fault can't
+                                   # spam RECONNECT/STT_RPC_ERROR every ~11s forever
 _WS_IDLE_TIMEOUT_S = 180  # long-lived stream: the idle clock is CONTINUOUS
                           # across turns (no per-turn WS teardown), and muted-
                           # during-TTS windows send ZERO binary frames — a long
@@ -151,6 +164,27 @@ async def _get_speech_client() -> Optional["SpeechAsyncClient"]:
                 _GCP_PROJECT, _SPEECH_API_ENDPOINT, _RECOGNIZER,
             )
     return _speech_client
+
+
+async def prewarm_speech_client() -> None:
+    """Construct the SpeechAsyncClient at app startup, OFF the WS handshake path.
+
+    2026-06-06 (Layer-4 bug): the `/stt/stream` handshake builds the client
+    lazily via ``_get_speech_client()`` BEFORE sending ``{"type":"ready"}``.
+    The gRPC channel + ADC credential load costs ~3.6s standalone (longer under
+    the live event loop), so the FIRST connection blew the FE's ready-timeout →
+    ``ready_timeout`` and a dead mic. Calling this once at startup pays that cost
+    before any traffic; the handshake then returns the cached client instantly.
+    Safe to call when the SDK is absent (no-op) and idempotent.
+    """
+    if not _SDK_OK:
+        _log.info("[STT] prewarm skipped — speech SDK unavailable")
+        return
+    try:
+        await _get_speech_client()
+        _log.info("[STT] prewarm complete — SpeechAsyncClient ready before first WS")
+    except Exception as exc:  # never block app startup on a prewarm failure
+        _log.warning("[STT] prewarm failed (will retry lazily on first WS): %r", exc)
 
 
 def _build_streaming_config(model: str = _PRIMARY_MODEL) -> "StreamingRecognitionConfig":
@@ -206,6 +240,7 @@ class _SttSession:
         self.last_backpressure_warn_ts: float = 0.0
         self.client_closed: bool = False
         self.dropped_frames: int = 0
+        self.reconnect_count: int = 0  # lifetime gRPC reconnects (B2 Day-9 loop cap)
 
     def _now(self) -> float:
         return time.time()
@@ -283,10 +318,13 @@ class _SttSession:
             try:
                 frame = await asyncio.wait_for(
                     self.audio_q.get(),
-                    timeout=min(timeout_remaining, 5.0),
+                    timeout=min(timeout_remaining, _KEEPALIVE_GET_TIMEOUT_S),
                 )
             except asyncio.TimeoutError:
-                # Idle frame slot — keep looping; outer task handles WS idle.
+                # Queue empty (muted TTS / user think-time). Yield a silence
+                # frame instead of nothing so Google's request stream stays warm
+                # and never aborts with "no more client requests". (B2 Day-9 fix.)
+                yield StreamingRecognizeRequest(audio=_SILENCE_FRAME)
                 continue
             if frame is None:
                 # Sentinel: client requested graceful end.
@@ -556,7 +594,13 @@ async def _grpc_loop(sess: _SttSession, client: "SpeechAsyncClient") -> None:
                 exc,
                 reconnect_attempted,
             )
-            if reconnect_attempted:
+            # Lifetime cap: reconnect_attempted resets on every clean rollover, so
+            # a starve→recover→starve pattern could otherwise loop forever. Bound
+            # the total reconnects per session (B2 Day-9 loop guard). The silence
+            # keepalive above should prevent starvation entirely; this is the
+            # backstop for a genuine, repeating gRPC fault.
+            sess.reconnect_count += 1
+            if reconnect_attempted or sess.reconnect_count > _MAX_RECONNECTS_PER_SESSION:
                 await sess._send_json(
                     {"type": "error", "code": "STT_RPC_ERROR", "detail": repr(exc)}
                 )
