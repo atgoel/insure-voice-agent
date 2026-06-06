@@ -247,6 +247,39 @@ def search_products(
             pass
     if product_type is not None:
         payload["product_type"] = product_type
+
+    # S2'' — Mechanical family-floater query enrichment (2026-06-06, Issue 2).
+    # Bug: "health insurance for my family of 4" returned an INDIVIDUAL plan.
+    # Root cause: the `query` text is LLM-constructed and flash-lite drops the
+    # "family" token (L-002), so ELSER can't distinguish MediCare Family Floater
+    # from HealthFirst Individual and the individual plan wins on score noise.
+    # Both are eligible candidates; the catalog HAS the family product — the
+    # signal was just missing from the query. Mirror the S2' pattern: read
+    # family_size from the validated profile (NOT the LLM) and append a
+    # deterministic floater phrase so the ELSER semantic field (which contains
+    # "family floater"/"entire family"/"maternity" for MediCare) ranks it first.
+    # Guarded to health + family_size>1 so individual/term/ULIP flows are untouched.
+    try:
+        if _profile and (product_type == "health"):
+            _fam = _profile.get("family_size")
+            try:
+                _fam = int(_fam) if _fam is not None else 0
+            except (TypeError, ValueError):
+                _fam = 0
+            if _fam > 1:
+                query = (
+                    f"{query} family floater health plan covering the entire "
+                    f"family of {_fam} members under a single sum insured"
+                )
+                payload["query"] = query
+                import logging as _l
+                _l.getLogger().info(
+                    "S2_FAMILY_INJECT session=%s family_size=%d -> floater query enrichment",
+                    (_session_id or "?")[:8], _fam,
+                )
+    except Exception:
+        pass
+
     # Debug — log what the LLM actually constructed for search args
     try:
         import logging as _l

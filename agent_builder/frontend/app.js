@@ -514,6 +514,34 @@ const formatCoverage = (p) => {
     return 'N/A';
 };
 
+// Issue 3 (2026-06-06): build a deterministic "Why it fits you" reason list
+// from rank_products' score_breakdown (already on the wire in each top3 item).
+// Ties the recommendation to the customer's stated profile to build confidence.
+// Pure client-side derivation — no LLM, no backend change (per L-001: keep
+// confidence-critical text deterministic). score_breakdown = {elser_relevance,
+// age_centrality, income_fit}; these map to coverage-goal / age / income fit.
+// (smoker/family/health are compliance filters, not in the score — eligibility
+// is implied by the product being in the PASSED list.)
+function buildWhyMatch(prod) {
+    const sb = prod.score_breakdown || {};
+    const reasons = [];
+    if (typeof sb.age_centrality === 'number' && sb.age_centrality >= 0.7) {
+        reasons.push('Well-suited to your age');
+    }
+    if (typeof sb.income_fit === 'number' && sb.income_fit >= 0.7) {
+        reasons.push('Premium fits comfortably within your income');
+    }
+    if (typeof sb.elser_relevance === 'number' && sb.elser_relevance >= 0.7) {
+        reasons.push('Closely matches the cover you asked for');
+    }
+    // Always give at least one confidence cue — passing compliance is itself a
+    // profile-tied fact (eligible for your age / smoker status / health).
+    if (reasons.length === 0) {
+        reasons.push("Passed all eligibility checks for your profile");
+    }
+    return reasons.slice(0, 2);  // keep cards tight — top 2 reasons
+}
+
 window.displayRecommendedProducts = function(passed, rejected = []) {
     sliderContainer.innerHTML = '';
     
@@ -547,6 +575,15 @@ window.displayRecommendedProducts = function(passed, rejected = []) {
         card.className = "product-card";
         const matchLabel = idxToLabel[i] || 'Match';
 
+        // Issue 3 — per-card "Why it fits you" reasons from score_breakdown.
+        const whyReasons = buildWhyMatch(prod);
+        const whyHtml = whyReasons.length
+            ? `<div class="card-why">
+                   <span class="card-why-label"><i class="fa-solid fa-circle-check"></i> Why it fits you</span>
+                   <ul class="card-why-list">${whyReasons.map(r => `<li>${r}</li>`).join('')}</ul>
+               </div>`
+            : '';
+
         card.innerHTML = `
             <div class="card-header-row">
                 <span class="card-title">${prod.name}</span>
@@ -554,6 +591,7 @@ window.displayRecommendedProducts = function(passed, rejected = []) {
             </div>
             <div class="card-match-pct" title="Ranked by ELSER semantic similarity"><i class="fa-solid fa-fire-flame-curved"></i> ${matchLabel}</div>
             <p class="card-desc">${prod.description || prod.key_feature || ''}</p>
+            ${whyHtml}
             <div class="card-meta-row">
                 <span>Coverage: <span class="card-cover">${formatCoverage(prod)}</span></span>
                 <span>Premium: <span class="card-price">${formatPremium(prod)}</span></span>
