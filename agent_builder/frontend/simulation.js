@@ -446,6 +446,7 @@ class VoiceSimulationEngine {
         // this IS the recommendation turn.
         // Progress audio + orb label: fires ONLY when response takes >3s.
         // Each clip is paired with a label shown on the orb — voice + visual in sync.
+        // The _progressCancelled flag ensures no clip plays after response arrives.
         const _progressLabels = [
             'Advisor: Understanding your needs...',
             'Advisor: Searching the plan catalog...',
@@ -456,17 +457,19 @@ class VoiceSimulationEngine {
         this._progressIdx = 0;
         this._progressAudio = null;
         this._progressClipTimer = null;
+        this._progressCancelled = false;
         const _orbLabel = document.getElementById('orb-status-label');
         const _playNextClip = () => {
-            if (this._progressIdx >= 5) return;
-            // Sync orb label with the clip about to play
+            if (this._progressCancelled || this._progressIdx >= 5) return;
             if (_orbLabel) _orbLabel.textContent = _progressLabels[this._progressIdx];
             this._progressAudio = new Audio(`/audio/progress_${this._progressIdx}.mp3`);
             this._progressIdx++;
             this._progressAudio.onended = () => {
+                if (this._progressCancelled) return;
                 this._progressClipTimer = setTimeout(_playNextClip, 3000);
             };
             this._progressAudio.play().catch(() => {
+                if (this._progressCancelled) return;
                 this._progressClipTimer = setTimeout(_playNextClip, 4000);
             });
         };
@@ -478,6 +481,7 @@ class VoiceSimulationEngine {
             body: JSON.stringify(requestBody)
         })
             .then(res => {
+                this._progressCancelled = true;
                 if (this._progressStartTimer) { clearTimeout(this._progressStartTimer); this._progressStartTimer = null; }
                 if (this._progressClipTimer) { clearTimeout(this._progressClipTimer); this._progressClipTimer = null; }
                 if (this._progressAudio) { try { this._progressAudio.pause(); this._progressAudio.src=''; } catch(e){} }
@@ -559,6 +563,7 @@ class VoiceSimulationEngine {
                 }
             })
             .catch(err => {
+                this._progressCancelled = true;
                 if (this._progressStartTimer) { clearTimeout(this._progressStartTimer); this._progressStartTimer = null; }
                 if (this._progressClipTimer) { clearTimeout(this._progressClipTimer); this._progressClipTimer = null; }
                 if (this._progressAudio) { try { this._progressAudio.pause(); this._progressAudio.src=''; } catch(e){} }
