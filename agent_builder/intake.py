@@ -100,9 +100,17 @@ def validate_name(value: str) -> Tuple[bool, Any]:
     # Sentence-boundary period: protect single-letter initials ("Mary J. Smith")
     # by only matching a period that ISN'T preceded by exactly one uppercase letter.
     # Can't use re.IGNORECASE here (it makes the lookbehind match lowercase too).
-    _clause_end = re.search(r"(?<![A-Z])\.", v)
-    if not _clause_end:
-        _clause_end = re.search(r"[,!?]|\band\b|\bor\b|\bbut\b|\d", v, re.IGNORECASE)
+    # Find the EARLIEST clause boundary — conjunction/digit usually appears before
+    # a deep period, so check both and pick whichever comes first.
+    _m1 = re.search(r"[,!?]|\band\b|\bor\b|\bbut\b|\d", v, re.IGNORECASE)
+    _m2 = re.search(r"(?<![A-Z])\.", v)
+    _clause_end = None
+    if _m1 and _m2:
+        _clause_end = _m1 if _m1.start() <= _m2.start() else _m2
+    elif _m1:
+        _clause_end = _m1
+    elif _m2:
+        _clause_end = _m2
     if _clause_end:
         v = v[:_clause_end.start()]
     # B-LIVE-4 (Day 8 live-test fix): STT v2 emits trailing punctuation on
