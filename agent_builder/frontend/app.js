@@ -239,16 +239,9 @@ btnStartSession.onclick = async () => {
         }
     }
 
-    // Warm up/unlock SpeechSynthesis synchronously inside the user click callback
-    if (window.speechSynthesis) {
-        try {
-            const warmUpUtterance = new SpeechSynthesisUtterance("");
-            window.speechSynthesis.speak(warmUpUtterance);
-            logDebug("[Audio] SpeechSynthesis warmed up successfully via user gesture.", "info");
-        } catch (e) {
-            console.warn("SpeechSynthesis warmup failed:", e);
-        }
-    }
+    // SpeechSynthesis warmup REMOVED (single-voice policy: Cloud TTS only).
+    // The old warmup spoke an empty utterance on page load which triggered
+    // the male browser voice. All audio now goes through voicePlayer (Cloud TTS).
 
     // Trigger simulation engine Speech greeting synchronously to capture
     // the click gesture's trusted state before any setTimeout splits the context.
@@ -427,14 +420,19 @@ window.updateVoiceState = function(state) {
     logDebug(`[Voice State] Swap to: ${state}`, "info");
 
     const labels = {
-        'IDLE': 'Advisor: Sitting Calm',
-        'LISTENING': 'Advisor: Listening to you...',
-        'PROCESSING': 'Advisor: Match & Guardrails...',
-        'SPEAKING': 'Advisor: Recommending...',
-        'BLOCKED': 'Advisor: Mic/STT Blocked'
+        'IDLE': 'Advisor: Ready',
+        'LISTENING': 'Advisor: Listening...',
+        'PROCESSING': 'Advisor: Thinking...',
+        'SPEAKING': 'Advisor: Speaking...',
+        'BLOCKED': 'Advisor: Mic Blocked'
     };
 
-    orbStatusLabel.textContent = labels[state] || 'Advisor: Online';
+    // Don't stomp the orb label while narration is active (the spoken-progress
+    // chain owns the label during the ~90s recommendation wait). Only allow
+    // voice-state to set it when narration is NOT running.
+    if (!_spokenProgressActive) {
+        orbStatusLabel.textContent = labels[state] || 'Advisor: Online';
+    }
     
     // Animate central core orb shadow glowing matching the color state
     const core = document.querySelector('.voice-orb-core');
@@ -449,6 +447,110 @@ window.updateVoiceState = function(state) {
         core.style.background = 'radial-gradient(circle, rgba(239, 68, 68, 0.2) 0%, rgba(15, 23, 42, 0.9) 100%)';
     } else {
         core.style.boxShadow = 'inset 0 2px 10px rgba(255, 255, 255, 0.05), 0 0 15px rgba(6, 182, 212, 0.15)';
+    }
+};
+
+// ----------------------------------------------------
+// Issue 1 (2026-06-06) — progress narration during the ~80s recommendation wait.
+// The /invoke POST blocks synchronously for the full pipeline (search →
+// compliance → rank → recommend, 5 sequential hops). With no signal during the
+// wait the orb just sits on a single label and the demo feels frozen. We rotate
+// the EXISTING orb status label through stage messages while the POST is in
+// flight. TEXT ONLY — deliberately NO spoken audio (spoken narration would
+// collide with the mute-during-TTS / dead-mic machinery). Purely cosmetic;
+// touches nothing on the backend or the request itself. Stops the moment the
+// response lands (or errors). Self-clearing, idempotent.
+// Each stage = the label shown on the orb AND (when spoken mode is on) the
+// short line the agent voices. Kept short for TTS. The visual label uses the
+// "Advisor: …" prefix; the spoken line is a natural sentence.
+const _ORB_NARRATION_STAGES = [
+    { label: 'Advisor: Understanding your needs...',        say: "Let me look into this for you." },
+    { label: 'Advisor: Searching the plan catalog...',      say: "Searching our plans for the best fit." },
+    { label: 'Advisor: Checking eligibility & guardrails...', say: "Now checking which ones you're eligible for." },
+    { label: 'Advisor: Ranking your best matches...',       say: "Ranking your best matches." },
+    { label: 'Advisor: Preparing your top matches...',      say: "Almost there — preparing your top matches." },
+];
+let _orbNarrationTimer = null;
+let _orbNarrationIdx = 0;
+let _spokenProgressActive = false;
+let _spokenProgressCancelled = false;
+
+// Toggle: speak the progress stages aloud (true) vs text-only on the orb
+// (false). Exposed on window so it can be flipped from the console during a
+// live test without a code change, e.g. `window.__SPEAK_PROGRESS = false`.
+if (typeof window.__SPEAK_PROGRESS === 'undefined') window.__SPEAK_PROGRESS = true;
+
+function _setOrbLabel(text) {
+    if (orbStatusLabel) orbStatusLabel.textContent = text;
+}
+
+// Spoken progress: play pre-generated Cloud TTS clips from /audio/progress_N.mp3.
+// These are generated at build time with the SAME en-IN-Neural2-A voice so there's
+// no voice mismatch. Played via a plain <audio> element (no MediaSource needed —
+// they're tiny complete MP3 files). Sequential + cancellable.
+function _speakProgressChain() {
+    let i = 0;
+    const playNext = () => {
+        if (_spokenProgressCancelled || i >= _ORB_NARRATION_STAGES.length) return;
+        const stage = _ORB_NARRATION_STAGES[i];
+        _setOrbLabel(stage.label);
+
+        const audio = new Audio(`/audio/progress_${i}.mp3`);
+        i++;
+        audio.onplay = () => { window.__voiceMicSuspended = true; };
+        audio.onended = () => {
+            window.__voiceMicSuspended = false;
+            if (_spokenProgressCancelled) return;
+            // Gap between clips for calm pacing
+            _orbNarrationTimer = setTimeout(playNext, 3000);
+        };
+        audio.onerror = () => {
+            window.__voiceMicSuspended = false;
+            if (_spokenProgressCancelled) return;
+            // Clip failed to load — advance label silently
+            _orbNarrationTimer = setTimeout(playNext, 5000);
+        };
+        audio.play().catch(() => {
+            // Autoplay blocked or file missing — advance silently
+            window.__voiceMicSuspended = false;
+            if (!_spokenProgressCancelled) {
+                _orbNarrationTimer = setTimeout(playNext, 5000);
+            }
+        });
+    };
+    playNext();
+}
+
+window.startOrbNarration = function() {
+    if (_orbNarrationTimer !== null || _spokenProgressActive) return;  // idempotent
+    if (!orbStatusLabel) return;
+    _spokenProgressCancelled = false;
+    _orbNarrationIdx = 0;
+    _setOrbLabel(_ORB_NARRATION_STAGES[0].label);
+
+    const canSpeak = window.__SPEAK_PROGRESS
+        && window.voicePlayer
+        && typeof window.voicePlayer.playTTS === 'function';
+
+    if (canSpeak) {
+        _spokenProgressActive = true;
+        _speakProgressChain();
+    } else {
+        // Fallback: silent text rotation every ~6s, clamped on the last stage.
+        _orbNarrationTimer = setInterval(() => {
+            _orbNarrationIdx = Math.min(_orbNarrationIdx + 1, _ORB_NARRATION_STAGES.length - 1);
+            _setOrbLabel(_ORB_NARRATION_STAGES[_orbNarrationIdx].label);
+        }, 6000);
+    }
+};
+
+window.stopOrbNarration = function() {
+    _spokenProgressCancelled = true;
+    _spokenProgressActive = false;
+    if (_orbNarrationTimer !== null) {
+        clearInterval(_orbNarrationTimer);
+        clearTimeout(_orbNarrationTimer);
+        _orbNarrationTimer = null;
     }
 };
 

@@ -126,9 +126,122 @@ def _sanitize_product(p):
 # Static presence check comment for test_t2_warmth_bugf.py:
 # Based on what you shared, here are my top three picks. 
 
-def _build_deterministic_response(top3_enriched: list) -> str:
+def _voice_why_clause(flat: dict, profile: dict) -> str:
+    """Build a short spoken 'why this fits YOU' clause tied to the customer's
+    profile (2026-06-06). Mirrors the FE card's buildWhyMatch but phrased for
+    speech and woven into the recommendation sentence. Deterministic (no LLM —
+    per L-001 the spoken personalization must not depend on flash honoring a
+    prompt). Sources: rank_products score_breakdown (age/income/coverage fit)
+    + validated intake profile (smoker/family) for concrete, grounded reasons."""
+    sb = flat.get("score_breakdown") or {}
+    reasons = []
+    try:
+        # DISTINCTIVE, product-specific reasons FIRST — these differentiate one
+        # product from another and are the most convincing ("this floater covers
+        # your family"). Generic score-fit reasons come after, as filler. We only
+        # speak the top 2, so ordering decides what the customer actually hears.
+        fam = profile.get("family_size")
+        try:
+            fam = int(fam) if fam is not None else 0
+        except (TypeError, ValueError):
+            fam = 0
+        tags = " ".join(flat.get("tags") or []).lower() if isinstance(flat.get("tags"), list) else str(flat.get("tags") or "").lower()
+        _is_floater = ("floater" in tags or "family" in tags)
+        _is_individual = ("individual" in tags)
+        if fam > 1 and _is_floater:
+            reasons.append(f"it covers your whole family of {fam} under a single plan")
+        elif fam > 1 and _is_individual:
+            # honest framing for an individual plan shown to a family customer
+            reasons.append("it's a strong individual plan you can pair with family cover")
+        if "maternity" in tags:
+            reasons.append("it includes maternity and newborn benefits")
+        if "no-claim bonus" in tags or "no claim bonus" in tags:
+            reasons.append("you earn a no-claim bonus for every claim-free year")
+        if profile.get("smoker") is False:
+            reasons.append("your non-smoker status helps keep the premium low")
+        # Generic score-fit reasons (filler, only if we still have room).
+        if isinstance(sb.get("income_fit"), (int, float)) and sb["income_fit"] >= 0.7:
+            reasons.append("the premium fits comfortably within your income")
+        if isinstance(sb.get("age_centrality"), (int, float)) and sb["age_centrality"] >= 0.7:
+            reasons.append("it's well-suited to your age")
+        if isinstance(sb.get("elser_relevance"), (int, float)) and sb["elser_relevance"] >= 0.7:
+            reasons.append("it closely matches the cover you asked for")
+    except Exception:
+        pass
+    if not reasons:
+        return ""
+    # Keep speech tight — at most 2 reasons per product.
+    picked = reasons[:2]
+    if len(picked) == 1:
+        return f" This is a great fit because {picked[0]}."
+    return f" This is a great fit because {picked[0]}, and {picked[1]}."
+
+
+def _build_deterministic_response(top3_enriched: list, profile: dict = None) -> str:
+    profile = profile or {}
+    # Bug B fix (2026-06-06): order the SPOKEN list by the SAME signal the FE
+    # cards use — elser_score / elser_relevance descending — so the voice and
+    # the on-screen cards agree on which product is #1. Previously the voice
+    # followed rank_products order (could lead with an individual plan) while
+    # the cards led with the family floater, contradicting each other.
+    def _elser(p):
+        sb = p.get("score_breakdown") or {}
+        return (
+            p.get("elser_score")
+            or p.get("elser_relevance")
+            or sb.get("elser_relevance")
+            or 0
+        )
+    _ordered = sorted(top3_enriched, key=_elser, reverse=True)
+
+    # Collect per-product reasons, then deduplicate: common reasons are said ONCE
+    # as a preamble, product-specific reasons are said per product. This prevents
+    # "your non-smoker status helps keep the premium low" repeating 3 times.
+    _all_reasons = []  # list of (product_idx, reason_text)
+    for _i, _flat in enumerate(_ordered):
+        sb = _flat.get("score_breakdown") or {}
+        reasons = []
+        fam = profile.get("family_size")
+        try:
+            fam = int(fam) if fam is not None else 0
+        except (TypeError, ValueError):
+            fam = 0
+        tags = " ".join(_flat.get("tags") or []).lower() if isinstance(_flat.get("tags"), list) else ""
+        if fam > 1 and ("floater" in tags or "family" in tags):
+            reasons.append(f"it covers your whole family of {fam} under a single plan")
+        if "maternity" in tags:
+            reasons.append("it includes maternity and newborn benefits")
+        if profile.get("smoker") is False:
+            reasons.append("your non-smoker status helps keep the premium low")
+        if isinstance(sb.get("income_fit"), (int, float)) and sb["income_fit"] >= 0.7:
+            reasons.append("the premium fits comfortably within your income")
+        if isinstance(sb.get("age_centrality"), (int, float)) and sb["age_centrality"] >= 0.7:
+            reasons.append("it's well-suited to your age")
+        if isinstance(sb.get("elser_relevance"), (int, float)) and sb["elser_relevance"] >= 0.7:
+            reasons.append("it closely matches the cover you asked for")
+        _all_reasons.append(reasons)
+
+    # Find reasons that appear in ALL products (common) vs unique per product
+    if len(_ordered) > 1:
+        _common = set(_all_reasons[0])
+        for r in _all_reasons[1:]:
+            _common &= set(r)
+        _unique_per_product = [[x for x in r if x not in _common] for r in _all_reasons]
+    else:
+        _common = set()
+        _unique_per_product = _all_reasons
+
+    # Build the common preamble (said once after "ranked from the best fit")
+    _common_clause = ""
+    if _common:
+        _common_list = sorted(_common)[:2]  # max 2 common reasons
+        if len(_common_list) == 1:
+            _common_clause = f" All of these are a great fit because {_common_list[0]}."
+        else:
+            _common_clause = f" All of these are a great fit because {_common_list[0]}, and {_common_list[1]}."
+
     _lines = []
-    for _i, _flat in enumerate(top3_enriched):
+    for _i, _flat in enumerate(_ordered):
         _name = _flat.get("name") or "Product"
         _pmin = _flat.get("premium_min_monthly")
         _pmax = _flat.get("premium_max_monthly")
@@ -139,26 +252,45 @@ def _build_deterministic_response(top3_enriched: list) -> str:
             _premium_str = f"premium from {int(_pmin):,} INR per month"
         else:
             _premium_str = ""
-        _ranking_words = ["First", "Second", "Third"][_i] if _i < 3 else f"Rank {_i+1}"
-        _line = f"{_ranking_words}, {_name}"
+        if len(_ordered) == 1:
+            _line = _name
+        else:
+            _ranking_words = ["First", "Second", "Third"][_i] if _i < 3 else f"Rank {_i+1}"
+            _line = f"{_ranking_words}, {_name}"
         if _kf:
             _line += f" — {_kf}"
         if _premium_str:
             _line += f" ({_premium_str})"
         _line += "."
+        # Only say UNIQUE reasons per product (common ones already said once)
+        _unique = _unique_per_product[_i][:2]  # max 2 unique per product
+        if _unique:
+            if len(_unique) == 1:
+                _line += f" This one stands out because {_unique[0]}."
+            else:
+                _line += f" This one stands out because {_unique[0]}, and {_unique[1]}."
         _lines.append(_line)
     
     if len(top3_enriched) == 1:
         return (
-            "Based on what you shared, here is my top pick. "
+            "Based on everything you shared, here is the plan that best matches your needs. "
             + " ".join(_lines)
-            + " Want me to tell you more about this option?"
+            + " Would you like me to tell you more about it?"
         )
-    elif len(top3_enriched) > 1:
+    elif len(top3_enriched) == 2:
         return (
-            f"Based on what you shared, here are my top {len(top3_enriched)} picks. "
+            "Based on everything you shared, here are your top two matches."
+            + _common_clause + " "
             + " ".join(_lines)
-            + " Want me to tell you more about any of these?"
+            + " Would you like me to tell you more about either of them?"
+        )
+    elif len(top3_enriched) > 2:
+        return (
+            "Based on everything you shared, here are your top three matches, "
+            "ranked from the best fit."
+            + _common_clause + " "
+            + " ".join(_lines)
+            + " Would you like me to tell you more about any of these?"
         )
     else:
         return "I could not find products matching your criteria; could you broaden your goal?"
@@ -185,10 +317,11 @@ def _synthesize_text_to_audio(text_to_speak: str) -> str | None:
         synthesis_input = texttospeech.SynthesisInput(text=clean_text)
         voice = texttospeech.VoiceSelectionParams(
             language_code="en-IN",
-            name="en-IN-Neural2-A"
+            name="en-IN-Chirp3-HD-Aoede"
         )
         audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+            speaking_rate=1.0,
         )
         
         # Call Google Cloud TTS API
@@ -233,6 +366,53 @@ def _looks_like_bailout(s: str) -> bool:
         return False
     s_lower = s.strip().lower()
     return any(p in s_lower for p in _BAILOUT_PHRASES)
+
+
+# Issue 4 (2026-06-06) — chain-of-thought / meta-reasoning leak guard. On a
+# free-form follow-up that falls through to the LLM, flash-lite occasionally
+# emits internal reasoning or punt phrasing as the user-facing answer
+# ("I should...", "the user wants...", "I wasn't provided with the top3...").
+# These must NEVER reach voice. We detect the leak and override with a safe
+# deterministic re-offer (the user can then pick a product or ask again).
+# Matched against the START of the (stripped, lowercased) text OR as a
+# substring for the unambiguous meta phrases.
+_COT_LEAK_PREFIXES = (
+    "i should ",
+    "i need to ",
+    "i will ",
+    "i'll ",
+    "let me think",
+    "thinking about",
+    "first, i",
+    "okay, so",
+    "the user wants",
+    "the user is asking",
+    "the customer wants",
+    "to answer this",
+    "based on the instructions",
+)
+_COT_LEAK_SUBSTRINGS = (
+    "wasn't provided",
+    "was not provided",
+    "i wasn't given",
+    "i don't have access to the top",
+    "i do not have the top",
+    "as an ai",
+    "as a language model",
+    "my instructions say",
+    "the system prompt",
+    "function_call",
+    "tool_code",
+)
+
+
+def _looks_like_cot_leak(s: str) -> bool:
+    if not s:
+        return False
+    s_lower = s.strip().lower()
+    if any(s_lower.startswith(p) for p in _COT_LEAK_PREFIXES):
+        return True
+    return any(p in s_lower for p in _COT_LEAK_SUBSTRINGS)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +615,7 @@ async def invoke(body: dict) -> JSONResponse:
             pass
 
     intake_state = _INTAKE_BY_SESSION.setdefault(session_id, {})
+    intake_state["_session_id"] = session_id  # enables LLM normalizer in intake
     if not intake_state.get("complete"):
         intake_result = handle_intake(intake_state, message.strip())
         if not intake_result.get("complete"):
@@ -527,7 +708,11 @@ async def invoke(body: dict) -> JSONResponse:
                     pass
                 return JSONResponse(
                     status_code=200,
-                    content={"session_id": session_id, "response": farewell_voice_text()},
+                    content={
+                        "session_id": session_id,
+                        "response": farewell_voice_text(),
+                        "session_ended": True,
+                    },
                 )
         except Exception:
             try:
@@ -550,13 +735,30 @@ async def invoke(body: dict) -> JSONResponse:
                 contact_invalid_voice_text,
                 contact_giveup_voice_text,
                 contact_captured_voice_text,
+                detect_followup_intent as _dfi_contact_guard,
             )
             _contact_state = _CBS.get(session_id) or {
                 "state": "NONE", "email": None, "invalid_attempts": 0,
             }
             _cstate = _contact_state.get("state", "NONE")
 
-            if _cstate == "ASKED":
+            # Bug A (Day 9): in ASKED state, a product follow-up like
+            # "Yeah, tell me more about the second one" must NOT be swallowed as
+            # yes-to-email just because is_yes_intent() matches the leading "yeah".
+            # If the turn carries a follow-up/ordinal/compare intent, it's a
+            # product question — yield to the S3 follow-up handler below. The
+            # contact state stays ASKED, so a later plain "yes" still works and
+            # the email offer is not re-appended (re-ask fires only on state==NONE).
+            _contact_followup_override = (
+                _cstate == "ASKED" and _dfi_contact_guard(message) is not None
+            )
+            if _contact_followup_override:
+                try:
+                    _log.info("T3_CONTACT_FOLLOWUP_OVERRIDE session=%s", session_id[:8])
+                except Exception:
+                    pass
+
+            if _cstate == "ASKED" and not _contact_followup_override:
                 if is_yes_intent(message):
                     _CBS[session_id] = {
                         "state": "AWAITING_EMAIL", "email": None, "invalid_attempts": 0,
@@ -697,11 +899,29 @@ async def invoke(body: dict) -> JSONResponse:
                             None,
                         )
                         if _matched is not None:
-                            return JSONResponse(
-                                status_code=200,
-                                content={"session_id": session_id,
-                                         "response": _b4_build_voice(_matched)},
-                            )
+                            # B4 sanity check: verify the classifier's product
+                            # actually matches what the user said. The LLM can
+                            # hallucinate a wrong tid with high confidence (seen
+                            # live: "critical care senior shield" → HLTH001
+                            # MediCare at 0.95). If no token from the product
+                            # name appears in the user message, fall through to
+                            # the regex S3 path which resolves correctly.
+                            _pname = (_matched.get("name") or "").lower()
+                            _msg_l = message.lower()
+                            _name_tokens = [t for t in _pname.split() if len(t) >= 4]
+                            _name_match = any(t in _msg_l for t in _name_tokens) if _name_tokens else True
+                            if not _name_match and _action == "ROUTE_NAMED":
+                                _log.warning(
+                                    "B4_HALLUCINATION_GUARD session=%s tid=%s product=%r "
+                                    "not mentioned in msg=%r — falling through to S3",
+                                    session_id[:8], _tid, _pname, message[:50],
+                                )
+                            else:
+                                return JSONResponse(
+                                    status_code=200,
+                                    content={"session_id": session_id,
+                                             "response": _b4_build_voice(_matched)},
+                                )
                     elif _action == "CLARIFY":
                         return JSONResponse(
                             status_code=200,
@@ -753,6 +973,8 @@ async def invoke(body: dict) -> JSONResponse:
                 match_product_by_name,
                 build_voice_text,
                 no_match_voice_text,
+                resolve_compare_products,
+                build_compare_voice_text,
             )
             from shared_state import TOP3_BY_SESSION as _TBS
             _intent = detect_followup_intent(message)
@@ -801,13 +1023,49 @@ async def invoke(body: dict) -> JSONResponse:
                         status_code=200,
                         content={"session_id": session_id, "response": no_match_voice_text()},
                     )
-            elif _intent == "compare":
-                # Parked — fall through to LLM (it can attempt comparison from
-                # whatever it remembers + retrieves). Future S4 may handle this.
-                try:
-                    _log.info("S3_FOLLOWUP_MISS session=%s reason=compare_parked", session_id[:8])
-                except Exception:
-                    pass
+            elif _intent == "compare" and _top3:
+                # Issue 4 (2026-06-06) — DETERMINISTIC compare handler. Replaces
+                # the old "parked → fall through to LLM" path that leaked
+                # chain-of-thought ("I should compare...", "the user wants...")
+                # to the user's voice. Resolve the two referenced products
+                # (ordinals/names, defaulting to top-2) and speak a grounded
+                # side-by-side built from TOP3_BY_SESSION. No LLM, no leak.
+                _cmp = resolve_compare_products(message, _top3)
+                if len(_cmp) >= 2:
+                    _prof_cmp = (_INTAKE_BY_SESSION.get(session_id, {}) or {}).get("profile") or {}
+                    _voice = build_compare_voice_text(_cmp[0], _cmp[1], _prof_cmp)
+                    try:
+                        _log.info(
+                            "S4_COMPARE_HIT session=%s a=%r b=%r",
+                            session_id[:8],
+                            (_cmp[0].get("name") or "?")[:30],
+                            (_cmp[1].get("name") or "?")[:30],
+                        )
+                    except Exception:
+                        pass
+                    return JSONResponse(
+                        status_code=200,
+                        content={"session_id": session_id, "response": _voice},
+                    )
+                elif len(_cmp) == 1:
+                    # Only one product resolvable — answer about that one.
+                    try:
+                        _log.info("S4_COMPARE_SINGLE session=%s product=%r", session_id[:8], (_cmp[0].get("name") or "?")[:30])
+                    except Exception:
+                        pass
+                    return JSONResponse(
+                        status_code=200,
+                        content={"session_id": session_id, "response": build_voice_text(_cmp[0])},
+                    )
+                else:
+                    try:
+                        _log.info("S4_COMPARE_MISS session=%s reason=unresolvable", session_id[:8])
+                    except Exception:
+                        pass
+                    return JSONResponse(
+                        status_code=200,
+                        content={"session_id": session_id, "response": no_match_voice_text()},
+                    )
             elif _intent in ("ordinal", "named") and not _top3:
                 # Intent detected but no recommendations exist yet — fall through
                 # to LLM (which will see the intake-complete state and re-run
@@ -822,6 +1080,39 @@ async def invoke(body: dict) -> JSONResponse:
                 _log.exception("S3_FOLLOWUP_DISPATCH_FAILED session=%s — falling through to LLM", session_id[:8])
             except Exception:
                 pass
+
+        # P2 guard (2026-06-08, duplicate-reco bug): if a recommendation ALREADY
+        # EXISTS for this session, a free-form fall-through (garbled STT, noise,
+        # unrecognized follow-up) should NOT re-run the full pipeline. Return a
+        # deterministic clarifier instead of handing it to the LLM — because the
+        # LLM will re-run search→compliance→rank→recommend and produce a confusing
+        # duplicate recommendation. The user can still drive named/ordinal/compare
+        # follow-ups (caught above); this guard only fires on the "nothing matched"
+        # fall-through path.
+        try:
+            from shared_state import TOP3_BY_SESSION as _TBS_GUARD
+            _has_existing_reco = bool(_TBS_GUARD.get(session_id))
+        except Exception:
+            _has_existing_reco = False
+        if _has_existing_reco:
+            try:
+                _log.info(
+                    "DUP_RECO_GUARD session=%s msg=%r — existing reco present, "
+                    "returning clarifier instead of re-running pipeline",
+                    session_id[:8], (message or "")[:40],
+                )
+            except Exception:
+                pass
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "session_id": session_id,
+                    "response": (
+                        "I can tell you more about any of the options I suggested — "
+                        "would you like the first, the second, or the third?"
+                    ),
+                },
+            )
 
         user_content = genai_types.Content(
             role="user",
@@ -964,6 +1255,33 @@ async def invoke(body: dict) -> JSONResponse:
         except Exception:
             pass
         response_text = ""  # force C.5b deterministic template at line 525 to fire
+
+    # Issue 4 (2026-06-06) — chain-of-thought leak scrub. On a free-form
+    # follow-up that fell through to the LLM, flash-lite sometimes returns its
+    # internal reasoning/punt as the answer ("I should...", "the user wants...",
+    # "I wasn't provided..."). If a recommendation already exists for this
+    # session (so this is a follow-up, not the initial turn), override the leak
+    # with a safe deterministic re-offer instead of speaking the reasoning.
+    # We use a non-empty replacement so the programmatic-pipeline block below
+    # does NOT re-run the slow full recommendation for a mere follow-up.
+    if _looks_like_cot_leak(response_text):
+        try:
+            from shared_state import TOP3_BY_SESSION as _TBS_COT
+            _has_prior_reco = bool(_TBS_COT.get(session_id))
+        except Exception:
+            _has_prior_reco = False
+        if _has_prior_reco:
+            try:
+                _log.info(
+                    "COT_LEAK_OVERRIDE session=%s text_preview=%r",
+                    session_id[:8], (response_text or "")[:60],
+                )
+            except Exception:
+                pass
+            response_text = (
+                "I can tell you more about any of the options I suggested — "
+                "would you like the first, the second, or the third?"
+            )
 
     # Stability P.2/C.5b — programmatic pipeline completion. flash-lite
     # occasionally emits final=[] WITHOUT calling any tools (right after
@@ -1134,10 +1452,26 @@ async def invoke(body: dict) -> JSONResponse:
                 "reject_reason": "; ".join(reasons) if reasons else "Not eligible",
             })
 
-    # Stability C.5b — final deterministic template fallback or Bug J/K alignment.
+    # Recommendation voice path (2026-06-06, user decision: ALWAYS deterministic).
+    # Whenever the pipeline produced a ranked top3, speak the deterministic,
+    # why-rich recommendation INSTEAD of the LLM explainer's text. Rationale:
+    #   - GUARANTEES the per-product "why it fits you" tied to the customer's
+    #     criteria (the LLM honored this only inconsistently — L-001).
+    #   - Eliminates the explainer punt/garbage leak ("I wasn't provided...",
+    #     "...I should") that reached users on the live demo.
+    #   - Drops one ~10s LLM hop, cutting recommendation latency.
+    # The LLM explainer's free-text is intentionally discarded here when top3
+    # exists; it remains only as a non-recommendation conversational fallback.
+    # Stability C.5b — deterministic template is now PRIMARY, not just fallback.
     if _has_pipeline_call:
-        if not response_text:
-            response_text = _build_deterministic_response(top3_enriched)
+        if top3_enriched:
+            response_text = _build_deterministic_response(top3_enriched, _validated_profile)
+            _log.info(
+                "DETERMINISTIC_PRIMARY session=%s n_products=%d (always-deterministic recommendation)",
+                session_id[:8], len(top3_enriched),
+            )
+        elif not response_text:
+            response_text = _build_deterministic_response(top3_enriched, _validated_profile)
             _log.info("DETERMINISTIC_FALLBACK_FIRED session=%s n_products=%d", session_id[:8], len(top3_enriched))
         elif len(top3_enriched) < len(_top_3_raw):
             # Bug J/K fix: If products were dropped from the enriched list, the original response_text
@@ -1147,7 +1481,7 @@ async def invoke(body: dict) -> JSONResponse:
                 "BUG_JK_REMEDY session=%s dropped some products; rebuilding response_text to align voice and cards.",
                 session_id[:8],
             )
-            response_text = _build_deterministic_response(top3_enriched)
+            response_text = _build_deterministic_response(top3_enriched, _validated_profile)
 
     # T1-Bug L — Server-side duplicate suppression (deduplication)
     _suppress_card_render = False

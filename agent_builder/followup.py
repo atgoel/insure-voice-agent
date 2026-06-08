@@ -295,6 +295,153 @@ def build_voice_text(product) -> str:
     return text
 
 
+def resolve_compare_products(message: str, top3: list) -> list:
+    """Resolve which products a 'compare' turn refers to. Returns up to 2 dicts.
+
+    Strategy:
+      1. Collect explicit ordinal references in the message (first/second/third).
+      2. Collect explicit name matches (substring/token) for any top3 product.
+      3. Merge (ordinals + names), dedup by product id, preserve mention order.
+      4. If fewer than 2 resolved (e.g. bare "what's the difference",
+         "which is better"), DEFAULT to the top 2 products by rank order —
+         the two the user is most likely looking at on screen.
+
+    Always returns 0, 1, or 2 product dicts. 0 only when top3 is empty.
+    Deterministic — no LLM (per L-001 / Issue 4 CoT-leak fix).
+    """
+    if not top3:
+        return []
+    m = message.strip().lower()
+    picked = []
+    seen_ids = set()
+
+    def _pid(p):
+        return p.get("id") or p.get("product_id") or id(p)
+
+    def _add(p):
+        if p is None:
+            return
+        k = _pid(p)
+        if k not in seen_ids:
+            seen_ids.add(k)
+            picked.append(p)
+
+    # 1+2 interleaved by position of mention so "compare the second and MediCare"
+    # keeps user's order. We scan ordinal patterns and name hits, tag each with
+    # the index where it appears in the message, then sort by that index.
+    hits = []  # (char_pos, product_dict)
+    for pat, idx in _ORDINAL_PATTERNS:
+        mt = pat.search(m)
+        if mt and 0 <= idx < len(top3):
+            hits.append((mt.start(), top3[idx]))
+    for prod in top3:
+        if not isinstance(prod, dict):
+            continue
+        name = (prod.get("name") or "").strip().lower()
+        if not name:
+            continue
+        pos = -1
+        if name in m:
+            pos = m.find(name)
+        else:
+            # shortest distinctive token (>=4 chars) of the product name
+            for tok in [t for t in re.findall(r"\b\w+\b", name) if len(t) >= 4]:
+                if tok in m:
+                    pos = m.find(tok)
+                    break
+        if pos >= 0:
+            hits.append((pos, prod))
+    hits.sort(key=lambda h: h[0])
+    for _pos, prod in hits:
+        _add(prod)
+        if len(picked) >= 2:
+            break
+
+    # 4 — default to top-2 by rank when the user didn't name two products.
+    if len(picked) < 2:
+        for prod in top3:
+            if isinstance(prod, dict):
+                _add(prod)
+            if len(picked) >= 2:
+                break
+    return picked[:2]
+
+
+def _compare_cover_phrase(prod: dict) -> str:
+    """One short distinctive phrase per product for the comparison line."""
+    kf = _fix_mojibake(prod.get("key_feature") or "")
+    if kf:
+        return kf
+    tags = prod.get("tags") or []
+    tl = " ".join(tags).lower() if isinstance(tags, list) else str(tags).lower()
+    if "floater" in tl or "family" in tl:
+        return "covers your whole family under one plan"
+    if "individual" in tl:
+        return "focused individual cover"
+    if "senior" in tl or "parents" in tl:
+        return "tailored for senior members"
+    desc = _fix_mojibake(prod.get("description") or "")
+    return " ".join(desc.split()[:14]) if desc else "comprehensive cover"
+
+
+def build_compare_voice_text(prod_a: dict, prod_b: dict, profile: dict = None) -> str:
+    """Deterministic side-by-side comparison of two products for voice.
+
+    NO LLM — built entirely from the two product dicts in TOP3_BY_SESSION.
+    This replaces the old 'compare → fall through to LLM' path that leaked
+    chain-of-thought ("I should compare...", "the user wants...") to the user.
+    Target <100 words for TTS. Null-safe throughout.
+    """
+    profile = profile or {}
+    if not isinstance(prod_a, dict) or not prod_a.get("name"):
+        return no_match_voice_text()
+    if not isinstance(prod_b, dict) or not prod_b.get("name"):
+        # Only one product resolvable — degrade to a single-product summary.
+        return build_voice_text(prod_a)
+
+    name_a = _fix_mojibake(prod_a.get("name") or "the first plan")
+    name_b = _fix_mojibake(prod_b.get("name") or "the second plan")
+
+    def _premium_phrase(p):
+        pmin = p.get("premium_min_monthly")
+        pmax = p.get("premium_max_monthly")
+        try:
+            if pmin and pmax:
+                return f"{int(pmin):,} to {int(pmax):,} INR a month"
+            if pmin:
+                return f"from {int(pmin):,} INR a month"
+        except (TypeError, ValueError):
+            pass
+        return ""
+
+    parts = [f"Here's how {name_a} and {name_b} compare."]
+    parts.append(f"{name_a} offers {_compare_cover_phrase(prod_a)}.")
+    pa = _premium_phrase(prod_a)
+    if pa:
+        parts.append(f"Its premium runs {pa}.")
+    parts.append(f"{name_b}, on the other hand, offers {_compare_cover_phrase(prod_b)}.")
+    pb = _premium_phrase(prod_b)
+    if pb:
+        parts.append(f"That one runs {pb}.")
+
+    # Grounded tiebreak from the customer's own profile (no opinion fabrication).
+    fam = profile.get("family_size")
+    try:
+        fam = int(fam) if fam is not None else 0
+    except (TypeError, ValueError):
+        fam = 0
+    if fam > 1:
+        ta = " ".join(prod_a.get("tags") or []).lower() if isinstance(prod_a.get("tags"), list) else ""
+        tb = " ".join(prod_b.get("tags") or []).lower() if isinstance(prod_b.get("tags"), list) else ""
+        if ("floater" in ta or "family" in ta) and not ("floater" in tb or "family" in tb):
+            parts.append(f"For a family of {fam}, {name_a} is the more natural fit.")
+        elif ("floater" in tb or "family" in tb) and not ("floater" in ta or "family" in ta):
+            parts.append(f"For a family of {fam}, {name_b} is the more natural fit.")
+
+    parts.append("Would you like to go with either of these?")
+    return " ".join(parts)
+
+
 def dispatch_followup(message: str, session_id: str) -> Optional[dict]:
     """Convenience top-level entrypoint for unit testing.
 
@@ -371,6 +518,23 @@ _DONE_PATTERNS_ANCHORED = (
     re.compile(r"^\s*ok\s+bye\s*$", re.IGNORECASE),
     re.compile(r"^\s*bye\s*$", re.IGNORECASE),
     re.compile(r"^\s*goodbye\s*$", re.IGNORECASE),
+    # --- BUG-E (Day 9) natural-farewell additions ---
+    # Anchored full-utterance "thanks"/"thank you" farewells: optional leading
+    # okay/ok/alright, a thanks-core with optional so much / very much / a lot,
+    # and an optional trailing bye/goodbye. Commas are already turned into
+    # spaces before matching, so "thank you, bye" -> "thank you bye" matches.
+    re.compile(
+        r"^\s*(okay|ok|alright)?\s*"
+        r"(thanks|thank\s+you)"
+        r"(\s+(so\s+much|very\s+much|a\s+lot))?"
+        r"(\s+(bye|goodbye))?\s*$",
+        re.IGNORECASE,
+    ),
+    # "that's it thanks" / "that is it thanks"
+    re.compile(r"^\s*that'?s\s+it\s+thanks?\s*$", re.IGNORECASE),
+    re.compile(r"^\s*that\s+is\s+it\s+thanks?\s*$", re.IGNORECASE),
+    # "cheers" / "cheers bye" / "cheers goodbye"
+    re.compile(r"^\s*cheers(\s+(bye|goodbye))?\s*$", re.IGNORECASE),
 )
 
 

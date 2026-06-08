@@ -304,6 +304,57 @@ def search_products(
             )
         except Exception:
             pass
+
+        # Issue 2 (2026-06-06) — HARD-EXCLUDE individual health plans for a
+        # family request. The S2_FAMILY_INJECT query enrichment above only
+        # *re-ranks* the floater higher; an individual plan could still appear
+        # in the candidate set and surface in cards/voice. User decision:
+        # exclude, not down-rank. We cut at search egress so the exclusion
+        # propagates to compliance, rank, cards AND voice in one place.
+        #
+        # Discriminator: tags contain "individual" but NOT "floater"/"family".
+        # Guarded to health + family_size>1 (term/ulip/individual flows untouched).
+        #
+        # DEMO-SAFETY NET: never filter to zero. The catalog currently has only
+        # ONE family-floater health product, so a young family may legitimately
+        # have just 1 eligible plan. If excluding individual would empty the
+        # pool, KEEP the original set (showing something beats a blank screen)
+        # and log it. This interim sparseness is resolved by the separate
+        # catalog-widening task, not by this filter.
+        try:
+            if _profile and (product_type == "health"):
+                _fam_excl = _profile.get("family_size")
+                try:
+                    _fam_excl = int(_fam_excl) if _fam_excl is not None else 0
+                except (TypeError, ValueError):
+                    _fam_excl = 0
+                _cands = result.get("candidates", []) or []
+                if _fam_excl > 1 and _cands:
+                    def _is_individual_only(_c):
+                        if not isinstance(_c, dict):
+                            return False
+                        _t = _c.get("tags") or []
+                        _tl = " ".join(_t).lower() if isinstance(_t, list) else str(_t).lower()
+                        return ("individual" in _tl) and not ("floater" in _tl or "family" in _tl)
+                    _kept = [c for c in _cands if not _is_individual_only(c)]
+                    import logging as _l
+                    if _kept and len(_kept) < len(_cands):
+                        result["candidates"] = _kept
+                        _l.getLogger().info(
+                            "S2_FAMILY_EXCLUDE session=%s family_size=%d dropped=%d kept=%d",
+                            (_session_id or "?")[:8], _fam_excl,
+                            len(_cands) - len(_kept), len(_kept),
+                        )
+                    elif _kept != _cands and not _kept:
+                        # Excluding would empty the pool — keep original, log the net.
+                        _l.getLogger().info(
+                            "S2_FAMILY_EXCLUDE_SKIPPED session=%s family_size=%d "
+                            "reason=would_empty_pool candidates=%d (catalog gap — widen later)",
+                            (_session_id or "?")[:8], _fam_excl, len(_cands),
+                        )
+        except Exception:
+            pass
+
         # Stability C.5b — stash candidates in session state so compliance_check
         # can substitute them server-side, bypassing the LLM's broken arg
         # threading (flash-lite passes [null, null, null, null] otherwise).
