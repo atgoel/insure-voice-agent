@@ -770,8 +770,8 @@ def handle_intake(intake_state: dict, message: str) -> dict:
             re.compile(r"(diabetes|blood\s*pressure|hypertension|heart|cancer|asthma|thyroid|cholesterol|pre[\s-]?existing|diabetic)", re.I),
         ],
         "family_size": [
-            # Specific patterns first (size is N, member size N) before the greedy generic
-            re.compile(r"family\s*(?:member)?\s*size\s*(?:is|of)?\s*(\w+)", re.I),
+            # Specific patterns first (size is/of/with N) before the greedy generic
+            re.compile(r"family\s*(?:member)?\s*size\s*(?:is|of|with)?\s*(\w+)", re.I),
             re.compile(r"family\s*(?:of|with)\s*(\w+)\s*(?:members?|people|persons?)?", re.I),
             re.compile(r"(\w+)\s*(?:family\s*)?members", re.I),
         ],

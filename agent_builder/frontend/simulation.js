@@ -444,9 +444,33 @@ class VoiceSimulationEngine {
         // last intake field triggers the pipeline). We use a simple heuristic:
         // if all 8 fields are answered (profile_keys length >= 8 from prior turns),
         // this IS the recommendation turn.
-        if (window.startOrbNarration && this._intakeFieldCount >= 7) {
-            window.startOrbNarration();
-        }
+        // Progress audio + orb label: fires ONLY when response takes >3s.
+        // Each clip is paired with a label shown on the orb — voice + visual in sync.
+        const _progressLabels = [
+            'Advisor: Understanding your needs...',
+            'Advisor: Searching the plan catalog...',
+            'Advisor: Checking eligibility...',
+            'Advisor: Ranking your best matches...',
+            'Advisor: Preparing your top matches...',
+        ];
+        this._progressIdx = 0;
+        this._progressAudio = null;
+        this._progressClipTimer = null;
+        const _orbLabel = document.getElementById('orb-status-label');
+        const _playNextClip = () => {
+            if (this._progressIdx >= 5) return;
+            // Sync orb label with the clip about to play
+            if (_orbLabel) _orbLabel.textContent = _progressLabels[this._progressIdx];
+            this._progressAudio = new Audio(`/audio/progress_${this._progressIdx}.mp3`);
+            this._progressIdx++;
+            this._progressAudio.onended = () => {
+                this._progressClipTimer = setTimeout(_playNextClip, 3000);
+            };
+            this._progressAudio.play().catch(() => {
+                this._progressClipTimer = setTimeout(_playNextClip, 4000);
+            });
+        };
+        this._progressStartTimer = setTimeout(_playNextClip, 3000);
 
         fetch(`${this.invokeUrl}/invoke`, {
             method: 'POST',
@@ -454,6 +478,9 @@ class VoiceSimulationEngine {
             body: JSON.stringify(requestBody)
         })
             .then(res => {
+                if (this._progressStartTimer) { clearTimeout(this._progressStartTimer); this._progressStartTimer = null; }
+                if (this._progressClipTimer) { clearTimeout(this._progressClipTimer); this._progressClipTimer = null; }
+                if (this._progressAudio) { try { this._progressAudio.pause(); this._progressAudio.src=''; } catch(e){} }
                 if (window.stopOrbNarration) window.stopOrbNarration();
                 if (!res.ok) throw new Error(`HTTP error ${res.status}`);
                 return res.json();
@@ -532,6 +559,9 @@ class VoiceSimulationEngine {
                 }
             })
             .catch(err => {
+                if (this._progressStartTimer) { clearTimeout(this._progressStartTimer); this._progressStartTimer = null; }
+                if (this._progressClipTimer) { clearTimeout(this._progressClipTimer); this._progressClipTimer = null; }
+                if (this._progressAudio) { try { this._progressAudio.pause(); this._progressAudio.src=''; } catch(e){} }
                 if (window.stopOrbNarration) window.stopOrbNarration();
                 console.error("Cloud Run /invoke failed:", err);
                 window.logDebug(`[/invoke ERROR] ${err.message}`, "warning");

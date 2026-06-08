@@ -221,11 +221,12 @@ def _build_deterministic_response(top3_enriched: list, profile: dict = None) -> 
             reasons.append("it closely matches the cover you asked for")
         _all_reasons.append(reasons)
 
-    # Find reasons that appear in ALL products (common) vs unique per product
+    # Find reasons that appear in MAJORITY of products (>=2) — say once as preamble.
+    # Using majority instead of ALL avoids "closely matches" repeating on 2 of 3.
     if len(_ordered) > 1:
-        _common = set(_all_reasons[0])
-        for r in _all_reasons[1:]:
-            _common &= set(r)
+        from collections import Counter
+        _reason_counts = Counter(r for reasons in _all_reasons for r in reasons)
+        _common = {r for r, count in _reason_counts.items() if count >= 2}
         _unique_per_product = [[x for x in r if x not in _common] for r in _all_reasons]
     else:
         _common = set()
