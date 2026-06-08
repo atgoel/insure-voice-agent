@@ -75,6 +75,7 @@
         let sessionId = null;
         let state = 'IDLE';            // IDLE | CONNECTING | OPEN | CLOSING
         let muteSTTOutput = false;     // FE suppression flag — see D8/D9
+        let _frameDiag = null;         // DIAG (2026-06-06): frame send/drop counters
 
         // -----------------------------------------------------------------
         // D8 — publish globals so B1 can drive suspend/resume.
@@ -87,6 +88,37 @@
         function _setMicSuspended(flag) {
             muteSTTOutput = !!flag;
             window.__voiceMicSuspended = !!flag;
+            // DIAG (2026-06-06): on unmute, report the PHYSICAL audio state so we
+            // know if the dead-mic is a suspended ctx (resume fixes) vs an ended
+            // mic track (needs re-getUserMedia). Decisive for root-cause.
+            if (!flag) {
+                let trackState = 'no-stream';
+                try {
+                    if (micStream) {
+                        const tr = micStream.getAudioTracks()[0];
+                        trackState = tr ? `${tr.readyState}/enabled=${tr.enabled}/muted=${tr.muted}` : 'no-track';
+                    }
+                } catch (_) {}
+                _logDbg(`[STT UNMUTE] ctx=${audioCtx ? audioCtx.state : 'null'} `
+                    + `micTrack=${trackState}`, 'info');
+            }
+            // DEAD-MIC FIX (2026-06-06): unmuting must PHYSICALLY reactivate the
+            // mic, not just clear the flag. A suspended AudioContext halts the
+            // worklet entirely → zero frames → mic deaf even with muteSTTOutput
+            // =false (confirmed live: sent stops climbing, muteSTTOutput=false).
+            // The ctx gets suspended during TTS (voice-player onplay) but the
+            // browser-TTS / rapid-double-TTS path never reliably resumes it.
+            // setMuted(false) is the canonical re-arm hook, so resume here.
+            if (!flag && audioCtx && audioCtx.state === 'suspended') {
+                try {
+                    audioCtx.resume().then(
+                        () => _logDbg('[STT] AudioContext resumed on unmute', 'info'),
+                        (e) => _logDbg('[STT] AudioContext resume failed: ' + e, 'warning'),
+                    );
+                } catch (e) {
+                    _logDbg('[STT] AudioContext resume threw: ' + e, 'warning');
+                }
+            }
         }
 
         // -----------------------------------------------------------------
@@ -114,16 +146,22 @@
                 // `state` would stay CONNECTING, wedging every future start()
                 // (the :342 guard early-returns on CONNECTING). In the long-lived
                 // design there's no per-turn rebuild to paper over this. Reject
-                // after 5s, reset state→IDLE so a later start() can retry, and
-                // close the half-open socket.
+                // after the timeout, reset state→IDLE so a later start() can retry,
+                // and close the half-open socket.
+                // 2026-06-06: bumped 5s→10s. The server builds ready AFTER the
+                // SpeechAsyncClient is available; even with startup pre-warm, a
+                // cold/jittery first connection can exceed 5s (measured ~3.6s
+                // standalone construct, longer under live loop). 10s clears it
+                // with margin while still bounding a genuinely dead handshake.
+                const READY_TIMEOUT_MS = 10000;
                 const readyTimer = setTimeout(() => {
                     if (!resolved) {
                         resolved = true;
                         state = 'IDLE';
                         try { s.close(4000, 'ready_timeout'); } catch (_) {}
-                        reject(new Error('STT ready not received within 5s'));
+                        reject(new Error('STT ready not received within 10s'));
                     }
-                }, 5000);
+                }, READY_TIMEOUT_MS);
 
                 s.onopen = () => {
                     _logDbg('[STT WS] open — sending config', 'info');
@@ -328,15 +366,34 @@
         function _onWorkletMessage(ev) {
             const data = ev && ev.data;
             if (!data || data.type !== 'pcm' || !data.buffer) return;
+            // DIAG (2026-06-06 dead-mic investigation): count frames sent vs
+            // dropped-by-mute, logged ≤1×/sec, to disambiguate "mic stuck muted"
+            // from "mic live but STT didn't transcribe". Remove once root-caused.
+            if (!_frameDiag) {
+                _frameDiag = { sent: 0, mutedDrop: 0, closedDrop: 0, last: 0 };
+            }
             // Suppress ALL frames upstream while suspended (defense-in-depth;
             // audioCtx.suspend() should already silence the worklet).
-            if (muteSTTOutput) return;
-            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (muteSTTOutput) { _frameDiag.mutedDrop++; _frameDiagFlush(); return; }
+            if (!ws || ws.readyState !== WebSocket.OPEN) { _frameDiag.closedDrop++; _frameDiagFlush(); return; }
             try {
                 ws.send(data.buffer);
+                _frameDiag.sent++;
+                _frameDiagFlush();
             } catch (err) {
                 _logDbg('[STT WS] send failed: ' + err, 'warning');
             }
+        }
+
+        function _frameDiagFlush() {
+            const now = (window.performance && performance.now) ? performance.now() : 0;
+            if (now - _frameDiag.last < 1000) return;
+            _frameDiag.last = now;
+            _logDbg(
+                `[STT FRAMES] sent=${_frameDiag.sent} mutedDrop=${_frameDiag.mutedDrop} `
+                + `closedDrop=${_frameDiag.closedDrop} (muteSTTOutput=${muteSTTOutput})`,
+                'info',
+            );
         }
 
         async function _closeMic() {

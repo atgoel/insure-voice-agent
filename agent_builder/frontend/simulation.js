@@ -33,8 +33,10 @@ class VoiceSimulationEngine {
         this.isPlayingVoice = false;
         this.currentUtterance = null;
         this.accumulatedTranscript = '';
-        this.postRecSilenceTimerId = null; // 15s post-turn silence prompt
+        this.postRecSilenceTimerId = null; // post-turn silence prompt
         this.silenceStrikeCount = 0;
+        this.lastTurnHadReco = false;    // set when top3 is rendered, extends timer to 30s
+        this._intakeFieldCount = 0;      // tracks intake progress; narration fires at >=7
 
         try {
             this.synth = window.speechSynthesis;
@@ -115,8 +117,13 @@ class VoiceSimulationEngine {
             return;
         }
 
-        // 15s post-turn silence prompt. Slot-filling lives server-side now (Atul's agent),
-        // so the client only needs one timer: nudge once, then wrap up.
+        // Post-turn silence timeout. After a long recommendation (top3 rendered),
+        // give the user 30s to digest and respond instead of the normal 15s.
+        // This prevents "Anything else?" from firing before they've even
+        // finished reading the cards. Track via this.lastTurnHadReco flag.
+        const _silenceMs = this.lastTurnHadReco ? 30000 : 15000;
+        this.lastTurnHadReco = false;  // reset after each arm
+
         this.postRecSilenceTimerId = setTimeout(() => {
             this.silenceStrikeCount++;
 
@@ -160,19 +167,24 @@ class VoiceSimulationEngine {
 
     async startListening() {
         if (!this.sttClient) return;
-        if (this.isPlayingVoice) return;   // never re-arm mid-TTS
         if (this.sessionEnded) return;
+
+        // UNMUTE FIRST (2026-06-06 dead-mic fix). The worklet drops EVERY audio
+        // frame while muteSTTOutput is true (stt-client.js:339), so the mic is
+        // deaf until this clears. Previously this lived AFTER the `isPlayingVoice`
+        // early-return below — so if a strike-1 nudge's speak() had re-set
+        // isPlayingVoice=true, startListening() returned before unmuting and the
+        // mic stayed dead for the rest of the turn (observed: "not a smoker" never
+        // reached the server). Unmuting is always safe; only TIMER-arming must
+        // wait for TTS to finish. This also covers the _speakBrowser fallback
+        // path where voice-player's onended never runs.
+        try { this.sttClient.setMuted(false); } catch (_) {}
+
+        if (this.isPlayingVoice) return;   // never ARM THE SILENCE TIMER mid-TTS
 
         this.shouldBeListening = true;
         window.updateVoiceState('LISTENING');
         this.accumulatedTranscript = '';
-
-        // Belt-and-suspenders unmute. voice-player's onended already cleared
-        // __voiceMicSuspended before this runs (it resolves playTTS first); this
-        // is idempotent and also covers the _speakBrowser fallback path where
-        // voice-player never ran. Do NOT treat this as the canonical unmute —
-        // voice-player owns that; this must not race it (it runs strictly after).
-        try { this.sttClient.setMuted(false); } catch (_) {}
 
         // Stream already live (turns 2+): just re-arm the silence timer, do NOT
         // rebuild the WS/mic/gRPC. sttActive alone is the "is the stream live?"
@@ -247,17 +259,25 @@ class VoiceSimulationEngine {
                 if (result && result.ok) {
                     if (callback) setTimeout(callback, 50);
                 } else {
-                    console.warn("[TTS] /tts/stream failed; falling back to browser TTS:", result && result.error);
-                    this._speakBrowser(text, callback, force);
+                    // Item 1 fix: do NOT fall back to browser TTS (causes voice
+                    // mismatch — robotic vs neural). If Cloud TTS fails, proceed
+                    // silently (text bubble already shown). The user reads it.
+                    console.warn("[TTS] /tts/stream failed — no fallback (single-voice policy):", result && result.error);
+                    window.updateVoiceState('IDLE');
+                    if (callback) setTimeout(callback, 50);
                 }
             }).catch((err) => {
                 this.isPlayingVoice = false;
-                console.warn("[TTS] /tts/stream threw; falling back to browser TTS:", err);
-                this._speakBrowser(text, callback, force);
+                console.warn("[TTS] /tts/stream threw — no fallback (single-voice policy):", err);
+                window.updateVoiceState('IDLE');
+                if (callback) setTimeout(callback, 50);
             });
             return;
         }
-        return this._speakBrowser(text, callback, force);
+        // voicePlayer not available — proceed silently (text bubble shown).
+        // Do NOT fall back to browser TTS (single-voice policy).
+        console.warn("[TTS] voicePlayer unavailable — silent (text only)");
+        if (callback) setTimeout(callback, 50);
     }
 
     _speakBrowser(text, callback, force = true) {
@@ -417,12 +437,24 @@ class VoiceSimulationEngine {
             requestBody.session_id = this.invokeSessionId;
         }
 
+        // Progress narration: ONLY on the recommendation turn (the slow one,
+        // ~80s). Intake turns return in <2s and don't need narration. Gate on
+        // intakeComplete flag — set when the server responds with top3 for the
+        // first time OR when all fields are filled (the NEXT /invoke after the
+        // last intake field triggers the pipeline). We use a simple heuristic:
+        // if all 8 fields are answered (profile_keys length >= 8 from prior turns),
+        // this IS the recommendation turn.
+        if (window.startOrbNarration && this._intakeFieldCount >= 7) {
+            window.startOrbNarration();
+        }
+
         fetch(`${this.invokeUrl}/invoke`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestBody)
         })
             .then(res => {
+                if (window.stopOrbNarration) window.stopOrbNarration();
                 if (!res.ok) throw new Error(`HTTP error ${res.status}`);
                 return res.json();
             })
@@ -451,14 +483,56 @@ class VoiceSimulationEngine {
                     const newTop3 = Array.isArray(data.top3) ? data.top3 : [];
                     const newRejected = Array.isArray(data.rejected) ? data.rejected : [];
                     window.displayRecommendedProducts(newTop3, newRejected);
+                    // Issue C fix: after a recommendation, give the user 30s
+                    // (not 15s) to respond before the silence nudge fires.
+                    if (newTop3.length > 0) this.lastTurnHadReco = true;
+                }
+
+                // Item 3 fix: if the server signals session_ended (farewell),
+                // immediately mark the session as ended so the silence timer
+                // never fires post-goodbye ("Anything else?" annoyance).
+                if (data.session_ended) {
+                    this.sessionEnded = true;
+                    this.clearSilenceTimers();
+                }
+
+                // Track intake progress — each non-recommendation response is
+                // one more field answered. Used to gate progress narration on
+                // only the recommendation turn (the slow one).
+                if (!('top3' in data)) {
+                    this._intakeFieldCount++;
                 }
 
                 window.addTranscriptBubble('AGENT', explanation);
-                this.speak(explanation, () => {
-                    this.startListening();
-                });
+
+                // Issue B fix: prefer the pre-synthesized base64 audio from
+                // /invoke (already generated server-side) over a separate
+                // /tts/stream call. The streaming endpoint fails on long text
+                // (ERR_INCOMPLETE_CHUNKED_ENCODING) causing a robotic fallback.
+                // Inline audio is a single complete MP3 blob — reliable.
+                if (data.audio_content && window.voicePlayer) {
+                    const blob = new Blob(
+                        [Uint8Array.from(atob(data.audio_content), c => c.charCodeAt(0))],
+                        { type: 'audio/mpeg' }
+                    );
+                    window.updateVoiceState('SPEAKING');
+                    window.voicePlayer._playBlob(blob, {}).then(() => {
+                        this.startListening();
+                    }).catch((err) => {
+                        // Blob playback failed — proceed silently (no browser TTS fallback)
+                        console.warn("[TTS] blob playback failed — silent (single-voice policy):", err);
+                        window.updateVoiceState('IDLE');
+                        this.startListening();
+                    });
+                } else {
+                    // Cloud TTS via /tts/stream (single-voice policy — no browser fallback)
+                    this.speak(explanation, () => {
+                        this.startListening();
+                    });
+                }
             })
             .catch(err => {
+                if (window.stopOrbNarration) window.stopOrbNarration();
                 console.error("Cloud Run /invoke failed:", err);
                 window.logDebug(`[/invoke ERROR] ${err.message}`, "warning");
                 const errMsg = "I'm having trouble reaching the recommendation service. Please try again in a moment.";

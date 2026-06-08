@@ -6,9 +6,14 @@ Defines the multi-agent pipeline using Google Agent Development Kit (ADK).
 Architecture:
     root_agent (LlmAgent — gemini-2.5-flash-lite)
         │
-        ├── MCPToolset → POST $ELASTIC_MCP_SERVER_URL/mcp  (MCP JSON-RPC)
-        │     Tool: search_products  ← elastic_mcp_server/main.py (Cloud Run)
-        │           ELSER v2 RRF hybrid query + elser_score injection
+        ├── FunctionTool: search_products → MCP tools/call @ $ELASTIC_MCP_SERVER_NATIVE_URL/mcp
+        │     Invokes the Elastic Partner MCP server over the MCP protocol
+        │     (Streamable HTTP JSON-RPC). A thin Python wrapper unwraps the MCP
+        │     envelope (structuredContent.candidates) and threads candidates via
+        │     session state (C.5b) — the LLM never sees the envelope, so flash-lite's
+        │     envelope-extraction failure (the reason MCPToolset was dropped) is moot.
+        │     Server: functions/elastic_mcp_server_native/main.py (FastMCP, stateless).
+        │           ELSER v2 RRF hybrid query + elser_score injection.
         │
         ├── FunctionTool: compliance_check  → POST $COMPLIANCE_CHECK_URL
         │     Deterministic eligibility rule engine (Constitution §II)
@@ -16,18 +21,21 @@ Architecture:
         └── FunctionTool: rank_products     → POST $RANK_PRODUCTS_URL
               Suitability scoring + top-3 ranking with audit trail
 
-MCP server is OUR Cloud Run service (functions/elastic_mcp_server/main.py).
-It is NOT the generic Elastic MCP container — it wraps the ELSER RRF query logic
-specific to InsureVoice (Constitution §VI).
+The MCP server is OUR Cloud Run service (functions/elastic_mcp_server_native/main.py).
+It wraps the ELSER RRF query logic specific to InsureVoice (Constitution §VI) and
+is the Partner-MCP integration point for the Devpost Elastic Partner Track —
+invoked over the MCP protocol at runtime (verified live 2026-06-06).
 
 Env vars required at runtime:
-    ELASTIC_MCP_SERVER_URL  — Cloud Run service URL (set by cloudbuild.yaml)
-    COMPLIANCE_CHECK_URL    — Cloud Function URL
-    RANK_PRODUCTS_URL       — Cloud Function URL
-    SIMULATE_PREMIUM_URL    — Cloud Function URL (Story 6 — may be empty for local dev)
+    ELASTIC_MCP_SERVER_NATIVE_URL — MCP-native Cloud Run URL (search_products via MCP)
+    ELASTIC_MCP_SERVER_URL        — REST sidecar URL (service-probe / fallback only)
+    COMPLIANCE_CHECK_URL          — Cloud Function URL
+    RANK_PRODUCTS_URL             — Cloud Function URL
+    SIMULATE_PREMIUM_URL          — Cloud Function URL (Story 6 — may be empty for local dev)
 """
 
 import os
+import json
 import httpx
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
@@ -49,9 +57,85 @@ SIMULATE_PREMIUM_URL          = os.environ.get("SIMULATE_PREMIUM_URL", "")   # o
 
 # ---------------------------------------------------------------------------
 # HTTP call helpers for compliance_check, rank_products, and search_products
-# (All three are plain REST calls — reliable and latency-predictable)
-# The elastic-mcp-server IS an MCP server (for demo); we call its REST endpoint
-# here because MCPToolset requires the /mcp path to be the sub-app root.
+#
+# search_products now invokes the Elastic Partner MCP server over the MCP
+# protocol (Streamable HTTP JSON-RPC `tools/call`) at $ELASTIC_MCP_SERVER_NATIVE_URL.
+# This makes "integration using MCP" (Devpost Elastic Partner Track requirement)
+# literally true at runtime — the agent calls the MCP server, not a REST sidecar.
+#
+# Why a Python wrapper instead of ADK MCPToolset: the MCP envelope wraps the
+# tool result as {content, structuredContent, isError}; flash-lite cannot extract
+# `candidates` from that envelope (it called compliance with an empty list). So
+# Python owns the unwrap (structuredContent.candidates) and the session-state
+# threading (C.5b), exactly as before — the LLM never sees the envelope. The
+# server runs FastMCP stateless_http=True, so a single `tools/call` works with
+# NO initialize handshake: one round-trip, latency-neutral with the old REST call
+# (verified ~969ms live, 2026-06-06).
+#
+# compliance_check and rank_products remain plain REST Cloud Function calls.
+# ---------------------------------------------------------------------------
+
+_MCP_HEADERS = {"Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json"}
+
+
+def _parse_mcp_response(resp: httpx.Response) -> dict:
+    """Parse an MCP Streamable-HTTP reply.
+
+    FastMCP answers `tools/call` as either a single JSON object or an SSE frame
+    (`data: {...}`). Return the decoded JSON-RPC object either way.
+    """
+    text = resp.text
+    ctype = resp.headers.get("content-type", "")
+    if "text/event-stream" in ctype or text.lstrip().startswith("event:") or "data:" in text[:80]:
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                return json.loads(line[5:].strip())
+        raise ValueError("MCP SSE response had no data frame")
+    return json.loads(text)
+
+
+def _mcp_search_call(arguments: dict, timeout: float = 8.0) -> dict:
+    """Invoke search_products on the Elastic MCP server via JSON-RPC tools/call.
+
+    Returns the inner tool payload {"candidates", "total_hits", "fallback_triggered"}
+    — the SAME shape the old REST endpoint returned — so all downstream handling
+    (C.5b candidate stash, .get("candidates", [])) is unchanged. Raises on
+    transport/JSON-RPC/parse error so the caller's existing except-blocks apply.
+    """
+    # stateless server (FastMCP stateless_http=True) → no initialize handshake.
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "search_products", "arguments": arguments}}
+    resp = httpx.post(f"{ELASTIC_MCP_SERVER_NATIVE_URL}/mcp",
+                      headers=_MCP_HEADERS, json=body, timeout=timeout)
+    resp.raise_for_status()
+    data = _parse_mcp_response(resp)
+    if "error" in data:
+        raise RuntimeError(f"MCP error: {data['error'].get('message', data['error'])}")
+    result = data.get("result", {}) or {}
+    if result.get("isError"):
+        raise RuntimeError(f"MCP tool isError: {result.get('content')}")
+    sc = result.get("structuredContent")
+    if isinstance(sc, dict) and "candidates" in sc:
+        return sc
+    # Fallback: some FastMCP versions nest the dict under structuredContent.result,
+    # or mirror it only in content[0].text — handle both so a server bump can't
+    # silently break the demo.
+    if isinstance(sc, dict) and isinstance(sc.get("result"), dict) and "candidates" in sc["result"]:
+        return sc["result"]
+    content = result.get("content")
+    if isinstance(content, list) and content:
+        inner = json.loads(content[0].get("text", "{}"))
+        if "candidates" in inner:
+            return inner
+    raise RuntimeError(f"MCP response missing candidates; result keys={list(result.keys())}")
+
+
+# ---------------------------------------------------------------------------
+# (legacy note) The elastic-mcp-server also exposes a plain REST /search_products
+# endpoint at $ELASTIC_MCP_SERVER_URL — retained for the service-probe layer and
+# as a documented fallback, but NOT used by the agent at runtime.
 # ---------------------------------------------------------------------------
 
 def search_products(
@@ -163,6 +247,39 @@ def search_products(
             pass
     if product_type is not None:
         payload["product_type"] = product_type
+
+    # S2'' — Mechanical family-floater query enrichment (2026-06-06, Issue 2).
+    # Bug: "health insurance for my family of 4" returned an INDIVIDUAL plan.
+    # Root cause: the `query` text is LLM-constructed and flash-lite drops the
+    # "family" token (L-002), so ELSER can't distinguish MediCare Family Floater
+    # from HealthFirst Individual and the individual plan wins on score noise.
+    # Both are eligible candidates; the catalog HAS the family product — the
+    # signal was just missing from the query. Mirror the S2' pattern: read
+    # family_size from the validated profile (NOT the LLM) and append a
+    # deterministic floater phrase so the ELSER semantic field (which contains
+    # "family floater"/"entire family"/"maternity" for MediCare) ranks it first.
+    # Guarded to health + family_size>1 so individual/term/ULIP flows are untouched.
+    try:
+        if _profile and (product_type == "health"):
+            _fam = _profile.get("family_size")
+            try:
+                _fam = int(_fam) if _fam is not None else 0
+            except (TypeError, ValueError):
+                _fam = 0
+            if _fam > 1:
+                query = (
+                    f"{query} family floater health plan covering the entire "
+                    f"family of {_fam} members under a single sum insured"
+                )
+                payload["query"] = query
+                import logging as _l
+                _l.getLogger().info(
+                    "S2_FAMILY_INJECT session=%s family_size=%d -> floater query enrichment",
+                    (_session_id or "?")[:8], _fam,
+                )
+    except Exception:
+        pass
+
     # Debug — log what the LLM actually constructed for search args
     try:
         import logging as _l
@@ -173,12 +290,71 @@ def search_products(
     except Exception:
         pass
     try:
-        # Timeout bumped from 2.5s -> 8.0s on Day 6 (S5 finding):
-        # CF cold-start + ELSER inference + RRF query routinely takes 3-5s.
-        # 2.5s caused n_candidates=0 timeouts on first call, breaking the demo arc.
-        resp = httpx.post(f"{ELASTIC_MCP_SERVER_URL}/search_products", json=payload, timeout=8.0)
-        resp.raise_for_status()
-        result = resp.json()
+        # Invoke the Elastic Partner MCP server over the MCP protocol (JSON-RPC
+        # tools/call). Timeout 8.0s (Day 6 S5 finding): CF cold-start + ELSER
+        # inference + RRF query routinely takes 3-5s; 2.5s caused n_candidates=0
+        # timeouts on first call, breaking the demo arc. The MCP path is a single
+        # round-trip (stateless server), latency-neutral with the old REST call.
+        result = _mcp_search_call(payload, timeout=8.0)
+        try:
+            import logging as _l
+            _l.getLogger().info(
+                "SEARCH_VIA_MCP candidates=%d total_hits=%s",
+                len(result.get("candidates", []) or []), result.get("total_hits"),
+            )
+        except Exception:
+            pass
+
+        # Issue 2 (2026-06-06) — HARD-EXCLUDE individual health plans for a
+        # family request. The S2_FAMILY_INJECT query enrichment above only
+        # *re-ranks* the floater higher; an individual plan could still appear
+        # in the candidate set and surface in cards/voice. User decision:
+        # exclude, not down-rank. We cut at search egress so the exclusion
+        # propagates to compliance, rank, cards AND voice in one place.
+        #
+        # Discriminator: tags contain "individual" but NOT "floater"/"family".
+        # Guarded to health + family_size>1 (term/ulip/individual flows untouched).
+        #
+        # DEMO-SAFETY NET: never filter to zero. The catalog currently has only
+        # ONE family-floater health product, so a young family may legitimately
+        # have just 1 eligible plan. If excluding individual would empty the
+        # pool, KEEP the original set (showing something beats a blank screen)
+        # and log it. This interim sparseness is resolved by the separate
+        # catalog-widening task, not by this filter.
+        try:
+            if _profile and (product_type == "health"):
+                _fam_excl = _profile.get("family_size")
+                try:
+                    _fam_excl = int(_fam_excl) if _fam_excl is not None else 0
+                except (TypeError, ValueError):
+                    _fam_excl = 0
+                _cands = result.get("candidates", []) or []
+                if _fam_excl > 1 and _cands:
+                    def _is_individual_only(_c):
+                        if not isinstance(_c, dict):
+                            return False
+                        _t = _c.get("tags") or []
+                        _tl = " ".join(_t).lower() if isinstance(_t, list) else str(_t).lower()
+                        return ("individual" in _tl) and not ("floater" in _tl or "family" in _tl)
+                    _kept = [c for c in _cands if not _is_individual_only(c)]
+                    import logging as _l
+                    if _kept and len(_kept) < len(_cands):
+                        result["candidates"] = _kept
+                        _l.getLogger().info(
+                            "S2_FAMILY_EXCLUDE session=%s family_size=%d dropped=%d kept=%d",
+                            (_session_id or "?")[:8], _fam_excl,
+                            len(_cands) - len(_kept), len(_kept),
+                        )
+                    elif _kept != _cands and not _kept:
+                        # Excluding would empty the pool — keep original, log the net.
+                        _l.getLogger().info(
+                            "S2_FAMILY_EXCLUDE_SKIPPED session=%s family_size=%d "
+                            "reason=would_empty_pool candidates=%d (catalog gap — widen later)",
+                            (_session_id or "?")[:8], _fam_excl, len(_cands),
+                        )
+        except Exception:
+            pass
+
         # Stability C.5b — stash candidates in session state so compliance_check
         # can substitute them server-side, bypassing the LLM's broken arg
         # threading (flash-lite passes [null, null, null, null] otherwise).
@@ -189,11 +365,11 @@ def search_products(
             pass
         return result
     except httpx.TimeoutException as exc:
-        return {"candidates": [], "error": f"search_products timed out: {exc}"}
+        return {"candidates": [], "error": f"search_products (MCP) timed out: {exc}"}
     except httpx.HTTPStatusError as exc:
-        return {"candidates": [], "error": f"search_products HTTP {exc.response.status_code}"}
+        return {"candidates": [], "error": f"search_products (MCP) HTTP {exc.response.status_code}"}
     except Exception as exc:
-        return {"candidates": [], "error": f"search_products unavailable: {exc}"}
+        return {"candidates": [], "error": f"search_products (MCP) unavailable: {exc}"}
 
 def compliance_check(
     candidates: list,
@@ -429,35 +605,58 @@ def _force_tool_call_mid_pipeline(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
 ) -> None:
-    events = getattr(callback_context, "_invocation_context", None)
     # Try multiple shapes — ADK API surface varies by version
+    inv_ctx = getattr(callback_context, "_invocation_context", None)
     session_events = []
     try:
-        session_events = callback_context._invocation_context.session.events or []
+        session_events = inv_ctx.session.events or []
     except Exception:
         try:
             session_events = callback_context.session.events or []
         except Exception:
             session_events = []
 
+    # LOOP FIX (2026-06-06): scope the scan to the CURRENT invocation only.
+    # session.events accumulates across ALL turns in this deployment (in-memory
+    # sessions, --max-instances=1), so a PRIOR turn's rank_products / search
+    # function_response would otherwise re-arm forcing on a later turn and the
+    # ADK run_async `while True` (terminates only on a pure-text final response)
+    # never breaks. Filter to this invocation_id so stale FRs can't re-trigger.
+    cur_inv_id = getattr(inv_ctx, "invocation_id", None)
+    if cur_inv_id is not None:
+        session_events = [
+            ev for ev in session_events
+            if getattr(ev, "invocation_id", cur_inv_id) == cur_inv_id
+        ]
+
+    # LATCH (2026-06-06): once recommend_and_explain has produced output in THIS
+    # invocation, the pipeline is DONE. Never force again — let the model emit
+    # the final verbatim text so run_async can terminate. Without this, flash-lite
+    # re-emits a pipeline tool call after the recommendation (prompt "STOP" does
+    # not bind a small model — lesson L-001), the fresh FR re-matches a forcing
+    # branch, and the agent loops forever (the 72.9s recommendation-turn bug).
+    pipeline_done = False
     last_fr_name = None
     last_fr_payload = None
     for ev in reversed(session_events):
         content = getattr(ev, "content", None)
         if content and getattr(content, "parts", None):
-            found = False
             for p in content.parts:
                 fr = getattr(p, "function_response", None)
                 if fr is not None:
-                    last_fr_name = getattr(fr, "name", None)
-                    last_fr_payload = getattr(fr, "response", None) or {}
-                    found = True
-                    break
-            if found:
+                    nm = getattr(fr, "name", None)
+                    if nm == "recommend_and_explain":
+                        pipeline_done = True
+                    if last_fr_name is None:
+                        last_fr_name = nm
+                        last_fr_payload = getattr(fr, "response", None) or {}
+            if pipeline_done:
                 break
 
     forced_tool = None
-    if last_fr_name == "search_products":
+    if pipeline_done:
+        forced_tool = None  # explicit: pipeline complete → release the force
+    elif last_fr_name == "search_products":
         n_candidates = len((last_fr_payload or {}).get("candidates", []) or [])
         if n_candidates > 0:
             forced_tool = "compliance_check"
@@ -476,9 +675,10 @@ def _force_tool_call_mid_pipeline(
     try:
         import logging as _l
         _l.getLogger().error(
-            "CALLBACK_DEBUG last_fr=%s n_events=%d forced=%s",
+            "CALLBACK_DEBUG last_fr=%s n_events=%d pipeline_done=%s forced=%s",
             last_fr_name,
             len(session_events or []),
+            pipeline_done,
             forced_tool,
         )
     except Exception:
@@ -530,11 +730,11 @@ root_agent = LlmAgent(
     before_model_callback=_force_tool_call_mid_pipeline,
     tools=[
         # ---------------------------------------------------------------
-        # Tool 1: Search products — REST call to elastic-mcp-server
-        # NOTE: Switched from MCPToolset (MCP-native /mcp) to plain REST FunctionTool.
-        # MCP-native wraps responses as {content, structuredContent, isError}; the LLM
-        # cannot extract `candidates` from that envelope, so compliance was always
-        # called with empty list. REST returns {candidates: [...]} directly.
+        # Tool 1: Search products — invokes the Elastic Partner MCP server over
+        # the MCP protocol (JSON-RPC tools/call). Wrapped as a FunctionTool (not
+        # ADK MCPToolset) so Python unwraps the {content, structuredContent,
+        # isError} envelope and threads candidates via session state — the LLM
+        # never sees the envelope it cannot parse. See _mcp_search_call above.
         # ---------------------------------------------------------------
         FunctionTool(search_products),
 
