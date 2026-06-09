@@ -538,6 +538,81 @@ _DONE_PATTERNS_ANCHORED = (
 )
 
 
+# ===========================================================================
+# OOS (out-of-scope) product category detection.
+# Fires BEFORE intake FSM so the pipeline is never invoked for categories
+# InsureVoice does not carry (vehicle, travel, home, marine, business, pet,
+# gadget). All patterns are substring-matched on the lowercased message.
+# ===========================================================================
+
+_OOS_PATTERNS = {
+    "vehicle": [
+        r"\b(car|auto|motor|vehicle|bike|motorcycle|two.?wheeler|scooter|truck|commercial vehicle)\s*(insurance|cover|policy|plan)\b",
+        r"\bmotor\s*(insurance|policy|cover)\b",
+    ],
+    "travel": [
+        r"\btravel\s*(insurance|cover|policy|plan)\b",
+        r"\b(international|domestic|trip|holiday|flight)\s*(insurance|cover|protection)\b",
+    ],
+    "home": [
+        r"\b(home|house|property|building|flat|apartment)\s*(insurance|cover|policy|plan)\b",
+        r"\bhomeowner'?s?\s*(insurance|cover)\b",
+    ],
+    "marine": [
+        r"\b(marine|cargo|ship|boat|vessel)\s*(insurance|cover|policy)\b",
+    ],
+    "business": [
+        r"\b(business|commercial|corporate|company|liability|professional indemnity|key.?man)\s*(insurance|cover|policy|plan)\b",
+    ],
+    "pet": [
+        r"\bpet\s*(insurance|cover|policy|plan)\b",
+        r"\b(dog|cat|animal)\s*(insurance|cover)\b",
+    ],
+    "gadget": [
+        r"\b(gadget|phone|mobile|laptop|electronics?|device)\s*(insurance|cover|protection|plan)\b",
+    ],
+}
+
+_OOS_VOICE = {
+    "vehicle": "vehicle or motor insurance",
+    "travel": "travel insurance",
+    "home": "home or property insurance",
+    "marine": "marine or cargo insurance",
+    "business": "business or commercial insurance",
+    "pet": "pet insurance",
+    "gadget": "gadget or electronics insurance",
+}
+
+
+def detect_oos_intent(message: str):
+    """Return the OOS category string if the message asks for an out-of-scope
+    insurance type, else None.
+
+    Only substring-matches on known OOS categories — in-scope terms like
+    'life insurance', 'health cover', 'term plan' are NOT listed and will
+    never trigger.
+    """
+    if not message:
+        return None
+    msg_lower = message.strip().lower()
+    for category, patterns in _OOS_PATTERNS.items():
+        for pat in patterns:
+            if re.search(pat, msg_lower):
+                return category
+    return None
+
+
+def oos_voice_text(category: str) -> str:
+    """Voice-friendly rejection for an OOS category. Safe to call with any
+    string — falls back to a generic label if category is not in _OOS_VOICE."""
+    label = _OOS_VOICE.get(category, "that type of insurance")
+    return (
+        f"I understand you're looking for {label}, but that's outside what I can help with today. "
+        f"InsureVoice specialises in life, health, critical illness, savings, retirement, and child education plans. "
+        f"Would you like me to help you find the right cover from these categories instead?"
+    )
+
+
 def is_done_intent(message: str) -> bool:
     """Detect done/farewell intent. Anchored full-utterance match.
 

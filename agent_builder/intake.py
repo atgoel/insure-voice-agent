@@ -85,7 +85,7 @@ def validate_name(value: str) -> Tuple[bool, Any]:
     v = _normalise(value)
     # Strip conversational fillers from the front ("Yeah, my name is..." → "my name is...")
     # These appear naturally when users start with an affirmation before stating their name.
-    v = re.sub(r"^(?:yeah|yes|yep|sure|okay|ok|so|well|right|hi|hey|hello)[\s,;:.\-!]*",
+    v = re.sub(r"^(?:yeah|yes|yep|sure|okay|ok|so|well|right|hi|hey|hello|then|actually|alright|great|perfect|wonderful|absolutely|of course|no problem)[\s,;:.\-!]*",
                "", v, flags=re.IGNORECASE).strip()
     # T4 — Bug A: strip conversational prefixes BEFORE length/character checks
     v = _strip_name_prefix(v)
@@ -252,8 +252,8 @@ def validate_smoker(value: str) -> Tuple[bool, Any]:
         return True, False
     if re.search(r"\bnon[\s\-]?smoker\b", v):
         return True, False
-    # "not a smoker" / "I'm not a smoker" / "not smoker" — explicit negation
-    if re.search(r"\bnot\s+(?:a\s+)?smoker\b", v):
+    # "not a smoker" / "not the smoker" / "I'm not a smoker" / "not smoker" — explicit negation
+    if re.search(r"\bnot\s+(?:a\s+|the\s+)?smoker\b", v):
         return True, False
     # Affirmative-of-smoke patterns ("I smoke", "smokes", "smoked").
     if re.search(r"\b(i\s+)?smoke(s|d)?\b", v) and not re.search(r"\b(don'?t|do not|never)\s+smoke", v):
@@ -286,8 +286,13 @@ def validate_income(value: str) -> Tuple[bool, Any]:
     if not m:
         return False, "Could you say your income as a number? Like '12 lakhs' or '1.5 crores'."
     n = float(m.group(1))
-    # Detect unit
-    if "crore" in v or "cr" in v or "Cr" in v:
+    # Detect unit — LPM (Lakhs Per Month) must be checked BEFORE the generic
+    # lakh/lac branch because "lpm" contains the substring "l" which the
+    # " l" guard below would also match, giving the wrong 1× multiplier.
+    # "25 LPM" → 25 × 100,000 × 12 = ₹3,000,000/year.
+    if re.search(r"\blpm\b|l\.p\.m\.|lakhs?\s+per\s+month|lacs?\s+per\s+month", v):
+        income = int(n * 100_000 * 12)
+    elif "crore" in v or "cr" in v or "Cr" in v:
         income = int(n * 10_000_000)
     elif "lakh" in v or "lac" in v or "lpa" in v or " l" in (" " + v):
         income = int(n * 100_000)

@@ -284,11 +284,13 @@
                     }
                     break;
                 case 'final':
-                    if (muteSTTOutput) {
-                        // Discard echo-tail finals while mic should be muted.
-                        _logDbg('[STT] final dropped (mic suspended): ' + (msg.text || ''), 'muted');
-                        return;
-                    }
+                    // Bug 1 fix (2026-06-09): do NOT suppress finals while muted.
+                    // Finals represent a completed, committed speech recognition result.
+                    // Dropping them while muteSTTOutput=true (set by TTS playback) caused
+                    // user farewell utterances ("thank you") said during/after agent speech
+                    // to be silently discarded — no user bubble, no /invoke call, silence
+                    // timer fired goodbye instead. Only interim + event are echo-prone;
+                    // finals are already latency-gated by the Chirp2 model itself.
                     if (cfg.onFinal) {
                         try { cfg.onFinal(msg.text || '', msg.confidence || 0); } catch (_) {}
                     }

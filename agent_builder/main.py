@@ -263,6 +263,32 @@ def _build_deterministic_response(top3_enriched: list, profile: dict = None) -> 
         if _premium_str:
             _line += f" ({_premium_str})"
         _line += "."
+        # Sum-assured mismatch caveat (Bug 2 fix, 2026-06-09):
+        # When a product's max_sum_assured is below what the customer requested,
+        # we still show it (safety-net: never leave zero results), but we MUST
+        # be honest so the customer knows the gap. Logged as SUM_ASSURED_MISMATCH.
+        try:
+            _profile_sa = int(profile.get("sum_assured") or 0)
+            _max_sa = int(_flat.get("max_sum_assured") or 0)
+            if _profile_sa > 0 and _max_sa > 0 and _max_sa < _profile_sa:
+                _max_lakh = _max_sa // 100_000
+                _req_lakh = _profile_sa // 100_000
+                if _req_lakh >= 100:
+                    _req_str = f"{_req_lakh // 100} crore{'s' if _req_lakh // 100 > 1 else ''}"
+                else:
+                    _req_str = f"{_req_lakh} lakhs"
+                _line += (
+                    f" Note: this plan covers up to {_max_lakh} lakhs,"
+                    f" which is below your target of {_req_str} —"
+                    f" it's the best available match right now."
+                )
+                import logging as _log_sa
+                _log_sa.getLogger(__name__).warning(
+                    "SUM_ASSURED_MISMATCH product=%r requested=%d max=%d",
+                    _name, _profile_sa, _max_sa,
+                )
+        except Exception:
+            pass  # never break the response path on caveat logic
         # Only say UNIQUE reasons per product (common ones already said once)
         _unique = _unique_per_product[_i][:2]  # max 2 unique per product
         if _unique:
@@ -612,6 +638,54 @@ async def invoke(body: dict) -> JSONResponse:
     except Exception:
         try:
             _log.exception("S3_RESET_DETECT_FAILED session=%s — falling through", session_id[:8])
+        except Exception:
+            pass
+
+    # OOS detection — fires BEFORE intake FSM so the pipeline is never invoked
+    # for categories InsureVoice doesn't carry (vehicle, travel, home, etc.).
+    # Guard: only fires when intake is NOT yet complete. If the user already
+    # received recommendations and asks "what about car insurance?" as a
+    # follow-up, S3/DUP_RECO_GUARD handles it — we don't short-circuit there.
+    try:
+        from followup import detect_oos_intent, oos_voice_text
+        # Guard: OOS only fires BEFORE intake is complete AND before recommendations exist.
+        # If TOP3_BY_SESSION has entries, the user already got recommendations — let
+        # S3/DUP_RECO_GUARD handle follow-ups (including OOS follow-ups).
+        _intake_already_complete = _INTAKE_BY_SESSION.get(session_id, {}).get("complete", False)
+        _has_prior_reco = False
+        try:
+            from shared_state import TOP3_BY_SESSION as _TBS_OOS
+            _has_prior_reco = bool(_TBS_OOS.get(session_id))
+        except Exception:
+            pass
+        _oos_category = detect_oos_intent(message)
+        if _oos_category and not _intake_already_complete and not _has_prior_reco:
+            try:
+                _log.info("OOS_DETECT session=%s category=%s msg=%r",
+                          session_id[:8], _oos_category, message[:60])
+            except Exception:
+                pass
+            # Silent batch-extract: run handle_intake to capture any valid fields
+            # (name/age/income etc.) that the user packed into the same message as the
+            # OOS request. This prevents swallowing valid data when user says e.g.
+            # "My name is Abhishek, age 25, I want car insurance".
+            try:
+                _oos_intake_state = _INTAKE_BY_SESSION.setdefault(session_id, {})
+                _oos_intake_state["_session_id"] = session_id
+                if not _oos_intake_state.get("complete"):
+                    handle_intake(_oos_intake_state, message.strip())
+                    _log.info("OOS_INTAKE_EXTRACT session=%s profile_keys=%s",
+                              session_id[:8],
+                              sorted((_oos_intake_state.get("profile") or {}).keys()))
+            except Exception:
+                pass
+            return JSONResponse(
+                status_code=200,
+                content={"session_id": session_id, "response": oos_voice_text(_oos_category)},
+            )
+    except Exception:
+        try:
+            _log.exception("OOS_DETECT_FAILED session=%s — falling through", session_id[:8])
         except Exception:
             pass
 
