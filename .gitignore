@@ -11,7 +11,7 @@ env/
 .specify/
 .venv/
 specs/
-
+docs/
 # Environment variables (never commit secrets)
 .env
 .env.local
