@@ -8,6 +8,20 @@
 > **Hackathon**: Building Agents for Real-World Challenges — Elastic Partner Track (Financial Services)
 > **Built with**: Google Cloud Agent Builder · Gemini 2.5 Flash Lite + Flash · Elastic MCP · ELSER v2 · Chirp 3 HD TTS · Speech-to-Text v2
 
+## Project Description
+
+InsureVoice is a production-oriented, voice-first insurance recommendation agent for financial services.
+It captures customer intent from speech, performs semantic product discovery with Elasticsearch ELSER v2,
+applies deterministic compliance guardrails, and returns ranked recommendations with explainable reasoning.
+The system is designed for fast agent-assist workflows with an end-to-end latency target under 8 seconds.
+
+## License (OSI Approved)
+
+This repository is licensed under the Apache License 2.0, an OSI-approved open-source license.
+
+- License file: [LICENSE](LICENSE)
+- SPDX identifier: Apache-2.0
+
 ---
 
 ## Tier B Voice-Stack (Day 8 — 2026-06-05)
