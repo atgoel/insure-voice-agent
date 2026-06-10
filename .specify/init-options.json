@@ -1,6 +1,0 @@
-{
-  "branch_numbering": "sequential",
-  "integration": "copilot",
-  "integration_options": ["--skills"],
-  "specs_dir": "specs"
-}
