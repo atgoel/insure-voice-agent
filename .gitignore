@@ -5,6 +5,12 @@ __pycache__/
 .venv/
 venv/
 env/
+.agents/
+.github/
+.pytest_cache/
+.specify/
+.venv/
+specs/
 
 # Environment variables (never commit secrets)
 .env
