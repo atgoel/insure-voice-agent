@@ -4,11 +4,23 @@ Welcome to **InsureVoice**, a state-of-the-art voice-first sales recommendation 
 
 This manual details the architecture, operations, local setup, and GCP Cloud Run deployment steps for the entire system.
 
-> **Last updated**: 2026-06-05 (Day 8 — Tier B voice-stack swap, in-tree on `stable_v4`, NOT yet deployed). Live revision `00030-jc7` (Day 7 baseline) currently serves 100% traffic. Day 9 plan is `--no-traffic` deploy + browser smoke + latency probe before traffic promotion. Sections that describe the voice path below reflect the Tier B `stable_v4` working copy, not what is live.
+> **Last updated**: 2026-06-10 (v7 — cover page + light theme UI on abhishek-final-branch. Server startup: `cd agent_builder && python -m uvicorn main:app --host 127.0.0.1 --port 8080 --reload` with `.env.local` loaded.)
 
 ---
 
 ## 1. Architectural Overview
+
+### v7 Frontend Architecture (2026-06-10)
+
+The v7 release introduces a two-page frontend served by the same FastAPI instance:
+
+| URL | File | Description |
+|---|---|---|
+| `http://localhost:8080/` | `frontend/index.html` | Cover/landing page with product selector |
+| `http://localhost:8080/agent` | `frontend/agent.html` | Light theme voice UI |
+| `http://localhost:8080/app_dark` | `frontend/app_dark.html` | Original dark theme (preserved) |
+
+`launchAgent()` in `index.html` navigates to `/agent` (same-origin, no absolute URL).
 
 InsureVoice is a single-stack voice agent built on Google Cloud (FastAPI on Cloud Run + Vertex AI Gemini + Elasticsearch via MCP + Cloud Speech-to-Text v2 + Cloud Text-to-Speech Chirp 3 HD).
 

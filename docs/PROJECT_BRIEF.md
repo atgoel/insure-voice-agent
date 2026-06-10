@@ -1,7 +1,12 @@
 # InsureVoice — Project Brief
 **Hackathon:** Google Cloud Rapid Agent — Elastic Partner Track
 **Submission deadline:** 2026-06-11 14:00 PT
-**Last updated:** 2026-06-03 (Day 6 of 14)
+**Last updated:** 2026-06-10 (v7 — cover page + light theme UI)
+
+**Recent updates:**
+- **Day 10 (2026-06-10) — v7:** Two-page frontend launched. Cover/landing page (`index.html`) at `/` with marketing content + product selector. Light theme voice UI (`agent.html`) at `/agent` — white/blue palette, `clearRect` canvas fix (no black box), mic popup fixed (`onend` no-auto-restart + `_restartPending` debounce). Original dark UI preserved at `/app_dark`. Branch: `abhishek-final-branch`.
+- **Day 8 (2026-06-05):** Tier B voice-stack swap — Chirp 3 HD streaming TTS (B1) + Speech-to-Text v2 streaming (B2) + Gemini Flash-Lite intent classifier (B4). All in-tree on `stable_v4`; **not yet deployed** — live revision `00030-jc7` still serves the Day 7 baseline. Day 9 plan: `--no-traffic` deploy + browser smoke + AC-B4.11 latency probe before traffic promotion. B3 (Silero VAD) DROPPED per D1 (hackathon-rule risk). B5/B6/B7 DEFERRED to Day 9+. Test suite on `stable_v4`: **567 passed / 29 skipped / 0 failed**.
+- **Day 7 (2026-06-04):** T1-T4 polish + Atul Story 5/6 merge + LIVE deploy on rev `00030-jc7`. 6/6 live arc battery PASS.
 
 ---
 
@@ -17,18 +22,21 @@ InsureVoice is a voice-driven AI insurance advisor. The user speaks via the brow
 The user can then say "tell me about LifeGuard Plus" or "the second one" to get a deterministic single-product detail. Or "start over" to reset.
 
 **Live demo:** https://insure-voice-agent-mhojvvbq4a-uc.a.run.app/
+**User flow (v7):** Cover page → "Talk to AI Advisor" → light theme voice agent (`/agent`)
 
 ---
 
 ## Tech stack
 
-| Layer | Technology |
-|---|---|
-| Voice | Web Speech API STT, Cloud TTS WaveNet (`en-IN-Wavenet-D`) |
-| Agent orchestration | Google ADK 2.1.0, Vertex AI Gemini 2.5 Flash Lite (root) + Flash (sub-agent) |
-| Search | Elastic Cloud Serverless, ELSER v2 sparse vectors, RRF hybrid |
-| Backend | FastAPI on Cloud Run, 3 Cloud Functions (search, compliance, rank) |
-| Hosting | Google Cloud Platform — project `voice-sales-agent` |
+| Layer | Technology (live `00030-jc7` — Day 7 baseline) | Technology (`stable_v4` Day 8 Tier B, pre-deploy) |
+|---|---|---|
+| Voice STT | Web Speech API (`webkitSpeechRecognition`), 1.2s silence-debounce | Google Cloud Speech-to-Text v2 + Chirp 2, native VAD 800ms, `WebSocket /stt/stream`, AudioWorklet 16kHz PCM mic |
+| Voice TTS | Cloud TTS WaveNet (`en-IN-Wavenet-D`) | Google Cloud Chirp 3 HD (`en-IN-Chirp3-HD-Aoede`), 24kHz MP3, `POST /tts/stream` (per-IP rate limit 30 req/min) |
+| Intent classification (follow-up turns) | Regex in `followup.py` | (Day 7 regex retained as fallback) + Gemini Flash-Lite separate sub-agent (`app_name="insure-voice-classifier"`), feature-flagged via `USE_LLM_INTENT_CLASSIFIER` (default off) |
+| Agent orchestration | Google ADK 2.1.0, Vertex AI Gemini 2.5 Flash Lite (root) + Flash (sub-agent) | Same |
+| Search | Elastic Cloud Serverless, ELSER v2 sparse vectors, RRF hybrid | Same |
+| Backend | FastAPI on Cloud Run, 3 Cloud Functions (search, compliance, rank) | Same + 3 new backend modules (`tts_streaming.py`, `stt_websocket.py`, `intent_classifier.py`) |
+| Hosting | Google Cloud Platform — project `voice-sales-agent` | Same |
 
 ---
 
@@ -80,8 +88,10 @@ Full architecture deep-dive: `docs/ARCHITECTURE.md` (~700 lines).
 | 4 | Abhishek | Frontend bundling, same-origin Cloud Run deploy, Markdown rendering, ELSER ranking badges |
 | 5 | Abhishek | Stability sprint — temperature config, ADK callback enforcement (mode=ANY tool routing), session-state argument substitution, deterministic intake state machine, deterministic template fallback. AC-3 (root agent invokes search) went 0/15 → 10/10 PASS. |
 | 6 | Abhishek | Bug 6 fix (product_type argument injector), Bug 9/10 fix (follow-up state machine), Bug 11/13/14 mitigation (defense-in-depth prompt rules), critical timeout fix (2.5s → 8.0s caught by live E2E test) |
+| 7 | Abhishek | T1-T4 polish + Atul Story 5/6 merge + LIVE deploy on rev `00030-jc7`. 6/6 live arc battery PASS. Phase 1 correctness fixes (Bugs J/K/L/M — Named-Product-Wins, session-dedup, mojibake fix) shipped in `stable_v4`. |
+| 8 | Abhishek | Tier B voice-stack swap — B1 Chirp 3 HD TTS + B2 Speech-to-Text v2 streaming + B4 Flash-Lite intent classifier (separate sub-agent under `app_name="insure-voice-classifier"`, feature-flagged via `USE_LLM_INTENT_CLASSIFIER`). 3 NEW backend modules + 3 NEW frontend modules. D1 dropped Silero VAD (hackathon rule risk). D13 `CANONICAL_FAREWELL_TEXT` constant. Reviewer M1+M2 fixes applied. **Test suite 551 → 567 PASS.** Tier B in-tree on `stable_v4`; **NOT yet deployed**. |
 
-Today's bundle is on branch `abhishek-stable-branch` (parent: `abhishek-day5-stability` @ commit `6370905`), pre-deploy.
+Today's `stable_v4` working copy is to be pushed onto branch `abhishek-stable-branch` (parent at push: `2cb367e` — Day 7 baseline). Live revision `00030-jc7` is unchanged. Day 9 plan: `--no-traffic` deploy + browser smoke + AC-B4.11 latency probe before traffic promotion.
 
 ---
 
@@ -111,7 +121,9 @@ Most user turns (intake questions, follow-ups, reset) are sub-100ms because they
 
 ## What's been validated
 
-**End-to-end demo arc (12 turns, against live infrastructure)** — verified 2026-06-03:
+**Test suite (Day 8, `stable_v4`):** 567 passed / 29 skipped / 0 failed (~28.86s). Up from 551 by +12 (`tests/test_intent_classifier.py`) + 4 (`tests/test_b2_resume_tail.py`).
+
+**End-to-end demo arc (12 turns, against live infrastructure)** — verified 2026-06-03 against live revision `00030-jc7`:
 - 8 intake turns → all canonical questions correct
 - Turn 9 (pipeline) → 3 products returned, voice text generated
 - Turn 10 ("tell me about LifeGuard Plus") → deterministic detail, NO LLM call
@@ -126,9 +138,13 @@ Verbatim log signals confirmed for every key path: argument injection, search pa
 
 | Item | Status | Why deferred |
 |---|---|---|
+| Tier B Cloud Run deploy + browser smoke + AC-B4.11 latency probe | Day 9 | `--no-traffic` deploy first, smoke + latency PASS before promoting traffic. Live rev `00030-jc7` stays available for instant rollback. |
+| B5 — Tool-result-only render | Day 9+ | Predecessor on G5 + B4 + v4 baseline capture. |
+| B6 — Backchannel injection | Day 9+ | Predecessor on B1 voice lock. AC-B6.0 measurement gate before threshold lock. |
+| B7 — ADK eval smoke harness | Day 9+ | D13 (`CANONICAL_FAREWELL_TEXT` constant) predecessor landed today. 5-case smoke only per D2. Local-run-only per D14. |
 | Catalog expansion (~20 new products incl. disease-specific health) | Day 7 backlog | Need ELSER index decision (shared vs isolated v2) |
 | Compare-products feature ("compare X and Y") | Parked | Currently falls through to LLM; deterministic implementation deferred |
-| Demo deck + Devpost video | Day 8-10 | Polish + storytelling work |
+| Demo deck + Devpost video | Day 10-12 | Polish + storytelling work |
 | Devpost final submission package | Day 11-14 | Code link + video + write-up |
 | 5 root-prompt bugs (4, 11, 13, 14, 15) | Mitigated | Architecture fixes (S2'/S3 deterministic) bypass LLM-prose path; ideal fix is in root prompt design |
 
@@ -140,8 +156,8 @@ Verbatim log signals confirmed for every key path: argument injection, search pa
 |---|---|
 | GitHub repo | `atul-goel_incrp/insure-voice-agent` (private) |
 | Active branch | `abhishek-stable-branch` |
-| Parent branch | `abhishek-day5-stability` @ commit `6370905` |
-| Live demo URL | https://insure-voice-agent-mhojvvbq4a-uc.a.run.app/ |
+| Parent at next push | `2cb367e` (Day 7 baseline) |
+| Live demo URL | https://insure-voice-agent-mhojvvbq4a-uc.a.run.app/ (rev `00030-jc7`, Day 7 baseline — Tier B not yet deployed) |
 | GCP project | `voice-sales-agent` (project number `1055350728739`) |
 | Region | `us-central1` |
 | Hackathon URL | rapid-agent.devpost.com |

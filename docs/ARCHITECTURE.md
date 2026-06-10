@@ -1,8 +1,8 @@
 # InsureVoice — Architecture Deep Dive
 ## Google Cloud Agent Builder + Elastic ELSER + Vertex AI Gemini
 
-> **Last updated**: 2026-06-05 (Day 8 EOD, Tier B implemented in `stable_v4` — pre-push, pre-deploy)
-> **Status**: Live revision `00030-jc7` (Day 7 baseline) serves 100% traffic. Tier B voice-stack swap (B1 Chirp 3 HD TTS + B2 Speech-to-Text v2 + B4 Flash-Lite intent classifier) is in-tree on `stable_v4` and will deploy to a new revision with `--no-traffic` on Day 9 before traffic promotion.
+> **Last updated**: 2026-06-10 (v7 — cover page + light theme UI, deployed on abhishek-final-branch)
+> **Status**: v7 ready for deploy on `abhishek-final-branch`. New two-page frontend: `/` (cover page) → `/agent` (light theme voice UI). Dark theme UI preserved at `/app_dark`.
 > **Active branch**: `abhishek-stable-branch` (parent at push: `2cb367e` — Day 7 baseline)
 > **Test suite (Day 8, `stable_v4`)**: **567 passed / 29 skipped / 0 failed** (~28.86s). Up from 551 by +12 (`test_intent_classifier.py`) + 4 (`test_b2_resume_tail.py`).
 
@@ -17,6 +17,11 @@
 | `insure-voice-agent` | Cloud Run | `https://insure-voice-agent-mhojvvbq4a-uc.a.run.app` | FastAPI `/invoke`, `/health` |
 | `compliance_check` | Cloud Function (2nd gen) | `https://us-central1-voice-sales-agent.cloudfunctions.net/compliance_check` | HTTP POST |
 | `rank_products` | Cloud Function (2nd gen) | `https://us-central1-voice-sales-agent.cloudfunctions.net/rank_products` | HTTP POST |
+
+**Frontend serving (v7):** FastAPI `StaticFiles(directory="frontend", html=True)` mounted at `/`.
+- `/` → `index.html` (cover page — InsureVoice marketing landing)
+- `/agent` → `agent.html` (light theme voice UI with B2 STT + B1 TTS)
+- `/app_dark` → `app_dark.html` (original dark theme UI, preserved)
 
 **LLM**: Gemini 2.5 Flash Lite (`gemini-2.5-flash-lite`) on Vertex AI `us-central1`
 **Sub-agent LLM**: Gemini 2.5 Flash (`gemini-2.5-flash`) — `recommend_and_explain` only
@@ -769,3 +774,22 @@ accept_recommendation event
 - **Demo script:** `docs/DEMO-SCRIPT.md`
 - **Hackathon plan (historical):** `docs/HACKATHON-PLAN.md`
 - **CEO pitch (historical):** `docs/CEO-PITCH-AND-BUDGET.md`
+
+---
+
+## v7 Frontend Changes (2026-06-10)
+
+| File | Role |
+|---|---|
+| `frontend/index.html` | Cover/landing page. `launchAgent()` → `/agent` |
+| `frontend/agent.html` | Light theme voice UI. `invoke-url=""` (same-origin) |
+| `frontend/app_dark.html` | Dark theme UI (renamed from old `index.html`) |
+| `frontend/app_light.js` | Light theme JS: `clearRect` canvas fix + no auto-initializeAudio on load |
+| `frontend/style_light.css` | Light theme CSS overrides (white/blue palette) |
+| `frontend/simulation.js` | PATCHED: `onend` no-auto-restart + `_restartPending` debounce guard |
+
+### Canvas Fix
+`app_light.js` line 339: replaced `ctx.fillStyle='rgba(10,11,18,0.2)'; ctx.fillRect(...)` with `ctx.clearRect(...)`. The dark fill was accumulating over animation frames into a solid black box in the light theme.
+
+### Mic Popup Fix  
+`simulation.js` `onend` handler: removed auto-`recognition.start()`. Added `_restartPending` boolean + 1000ms debounce. `recognition.continuous=true` keeps the session open on localhost/HTTPS without needing restarts.
