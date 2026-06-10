@@ -1,10 +1,147 @@
-openapi: "3.0.0"
+# InsureVoice — Agent Builder Tool Definitions
+#
+# This file registers the three Sub-Agent tools used by the Root Agent (Insurance Sales Supervisor).
+#
+# Tool ownership:
+#   elastic_product_search  — Elastic MCP Server (Cloud Run) — Constitution §VI primary search integration.
+#                             Agent Builder calls POST $ELASTIC_MCP_SERVER_URL/search_products directly.
+#                             No Cloud Function wrapper. The MCP server owns:
+#                               _validate(), _build_query(), RRF hybrid search, elser_score injection.
+#                             MCP server also exposes POST /mcp (JSON-RPC) for MCPToolset clients.
+#                             Env var in Agent Builder console: PRODUCT_SEARCH_URL = $MCP_URL/search_products
+#
+#   compliance_check        — Cloud Function (functions/compliance_check/main.py)
+#                             Deterministic eligibility rule engine. Zero LLM involvement (Constitution §II).
+#                             Env var: COMPLIANCE_CHECK_URL
+#
+#   rank_products           — Cloud Function (functions/rank_products/main.py)
+#                             Suitability scoring + top-3 ranking with full audit trail.
+#                             Env var: RANK_PRODUCTS_URL
+#
+# OpenAPI 3.0.3 — validated with openapi-spec-validator (TASK-050)
+openapi: "3.0.3"
 info:
   title: InsureVoice Cloud Function Tools
   version: "1.0"
   description: OpenAPI specs for Agent Builder tool registration
 
 paths:
+
+  # ---------------------------------------------------------------------------
+  # Tool 1: elastic_product_search — Elastic MCP Server REST endpoint
+  # Agent Builder calls POST $MCP_SERVER_URL/search_products directly (no CF wrapper)
+  # MCP Server: validates input, builds RRF query, calls Elasticsearch, injects elser_score
+  # ---------------------------------------------------------------------------
+  /elastic_product_search:
+    post:
+      operationId: elastic_product_search
+      summary: Search the insurance product catalog using ELSER v2 hybrid search (Elastic MCP Server)
+      description: >
+        Validates input, builds an RRF hybrid query (ELSER semantic on description +
+        key_feature, BM25 on name/tags/sales_pitch), and executes it directly against
+        the insurance_products_current Elasticsearch alias via the Elastic MCP Server
+        (Cloud Run). Hard eligibility filters (age, income, smoker) are applied at
+        search time as a pre-compliance optimisation. Returns up to 10 candidate products
+        with raw ELSER relevance scores for downstream compliance and ranking.
+        Constitution §VI: this service IS the primary Elastic search integration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query, customer_age, is_smoker, income]
+              properties:
+                query:
+                  type: string
+                  description: >
+                    Natural-language customer intent, e.g.
+                    "affordable term plan for a 35-year-old non-smoker with family"
+                customer_age:
+                  type: integer
+                  minimum: 18
+                  maximum: 75
+                  description: Customer age in years; used for eligibility pre-filter
+                is_smoker:
+                  type: boolean
+                  description: >
+                    If true, filters out products where smoker_eligible=false
+                income:
+                  type: integer
+                  minimum: 0
+                  description: Annual income in INR; filters products by min_income
+                product_type:
+                  type: string
+                  description: >
+                    Optional product type filter (e.g. "term_life", "health", "ulip",
+                    "endowment", "critical_illness", "pension", "child_plan")
+                size:
+                  type: integer
+                  minimum: 1
+                  maximum: 20
+                  default: 10
+                  description: Maximum number of candidate products to return
+                relax_age_filter:
+                  type: boolean
+                  default: false
+                  description: >
+                    When true, skips age bounds filter as a fallback when the strict
+                    query returns no results. Agent Builder should set this after a
+                    zero-result strict search.
+      responses:
+        "200":
+          description: Search results with ELSER relevance scores
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidates:
+                    type: array
+                    description: >
+                      Candidate products with all InsuranceProduct fields plus
+                      elser_score (raw RRF _score, not normalised)
+                    items:
+                      type: object
+                      properties:
+                        id:                     { type: string }
+                        name:                   { type: string }
+                        product_type:           { type: string }
+                        plan_category:          { type: string }
+                        description:            { type: string }
+                        key_feature:            { type: string }
+                        min_age:                { type: integer }
+                        max_age:                { type: integer }
+                        smoker_eligible:        { type: boolean }
+                        min_income:             { type: integer }
+                        max_sum_assured:        { type: integer }
+                        medical_required_above: { type: integer }
+                        premium_min_monthly:    { type: integer }
+                        premium_max_monthly:    { type: integer }
+                        is_active:              { type: boolean }
+                        elser_score:            { type: number, description: "Raw RRF _score from Elasticsearch" }
+                  total_hits:
+                    type: integer
+                    description: Total documents matching the query before size limit
+                  fallback_triggered:
+                    type: boolean
+                    description: True when relax_age_filter was applied for this request
+        "400":
+          description: Invalid request — missing or wrong-type fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        "500":
+          description: Elasticsearch error (cluster unreachable, query malformed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchError'
+
+  # ---------------------------------------------------------------------------
+  # Tool 2: compliance_check Cloud Function (TASK-042 adds 400/500)
+  # ---------------------------------------------------------------------------
   /compliance_check:
     post:
       operationId: compliance_check
@@ -12,6 +149,7 @@ paths:
       description: >
         Applies deterministic compliance rules to filter out insurance products that
         the customer is ineligible for. Returns passed and rejected products with reasons.
+        Constitution §II: this function never calls an LLM — all rules are pure Python predicates.
       requestBody:
         required: true
         content:
@@ -22,18 +160,17 @@ paths:
               properties:
                 candidate_products:
                   type: array
-                  description: List of product objects returned by the search agent
-                  items:
-                    type: object
+                  description: List of product objects returned by elastic_product_search
+                  items: { type: object }
                 customer_profile:
                   type: object
-                  description: Structured customer profile extracted from voice input
+                  required: [age, income, smoker, health_status]
                   properties:
-                    age:          { type: integer, description: "Customer age in years" }
-                    income:       { type: integer, description: "Annual income in INR" }
-                    smoker:       { type: boolean, description: "Whether the customer is a smoker" }
-                    health_status:{ type: string, enum: [healthy, pre_existing], description: "Declared health status" }
-                    sum_need:     { type: integer, description: "Desired sum assured in INR" }
+                    age:           { type: integer, description: "Customer age in years" }
+                    income:        { type: integer, description: "Annual income in INR" }
+                    smoker:        { type: boolean, description: "Whether the customer is a smoker" }
+                    health_status: { type: string, enum: [healthy, pre_existing] }
+                    sum_need:      { type: integer, description: "Desired sum assured in INR" }
       responses:
         "200":
           description: Compliance check result
@@ -44,25 +181,45 @@ paths:
                 properties:
                   passed:
                     type: array
-                    description: Products that passed all compliance rules
+                    description: >
+                      Full product objects that passed all compliance rules.
+                      Passed to rank_products as passed_products.
                     items: { type: object }
                   rejected:
                     type: array
-                    description: Products that failed at least one compliance rule
+                    description: >
+                      Products that failed at least one compliance rule.
+                      Contains only product_id, product_name, and reasons — not the full product object.
                     items:
                       type: object
                       properties:
                         product_id:   { type: string }
                         product_name: { type: string }
                         reasons:      { type: array, items: { type: string } }
+        "400":
+          description: Invalid request — missing or wrong-type required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalError'
 
+  # ---------------------------------------------------------------------------
+  # Tool 3: rank_products Cloud Function (TASK-042 adds 400/500; TASK-043 adds audit)
+  # ---------------------------------------------------------------------------
   /rank_products:
     post:
       operationId: rank_products
       summary: Score and rank compliance-passed products by customer suitability
       description: >
-        Applies a weighted scoring formula (ELSER relevance + age centrality + income fit)
-        to rank the top 3 most suitable insurance products for a customer profile.
+        Applies a weighted scoring formula (ELSER relevance × 0.4 + age_centrality × 0.3
+        + income_fit × 0.3) to rank the top 3 most suitable insurance products for a
+        customer profile. ELSER scores are normalised across the batch before use.
       requestBody:
         required: true
         content:
@@ -73,18 +230,18 @@ paths:
               properties:
                 passed_products:
                   type: array
-                  description: Compliance-passed products from compliance_check
+                  description: Compliance-passed products from compliance_check (passed[])
                   items: { type: object }
                 customer_profile:
                   type: object
-                  description: Structured customer profile
+                  required: [age, income]
                   properties:
-                    age:    { type: integer }
-                    income: { type: integer }
+                    age:      { type: integer }
+                    income:   { type: integer }
                     sum_need: { type: integer }
       responses:
         "200":
-          description: Ranked top-3 products
+          description: Ranked top-3 products with full audit trail
           content:
             application/json:
               schema:
@@ -96,7 +253,86 @@ paths:
                     items:
                       type: object
                       properties:
-                        rank:             { type: integer }
-                        product:          { type: object }
-                        suitability_score:{ type: number }
-                        score_breakdown:  { type: object }
+                        rank:
+                          type: integer
+                        product:
+                          type: object
+                          description: Full InsuranceProduct fields including flat premium fields
+                        suitability_score:
+                          type: number
+                          minimum: 0
+                          maximum: 1
+                        score_breakdown:
+                          type: object
+                          properties:
+                            elser_relevance: { type: number, minimum: 0, maximum: 1 }
+                            age_centrality:  { type: number, minimum: 0, maximum: 1 }
+                            income_fit:      { type: number, minimum: 0, maximum: 1 }
+                  audit:
+                    type: object
+                    description: >
+                      Full audit trail required by Constitution §IV. Present in every
+                      response including empty top3 responses.
+                    properties:
+                      all_scored:
+                        type: array
+                        description: All evaluated products with their scores, sorted descending
+                        items: { type: object }
+                      formula_weights:
+                        type: object
+                        properties:
+                          elser:  { type: number }
+                          age:    { type: number }
+                          income: { type: number }
+                      customer_profile_hash:
+                        type: string
+                        description: SHA-256 of the anonymised customer profile (no PII stored)
+        "400":
+          description: Invalid request — missing or wrong-type required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalError'
+
+# ---------------------------------------------------------------------------
+# Shared error schemas (referenced by $ref above)
+# ---------------------------------------------------------------------------
+components:
+  schemas:
+    ValidationError:
+      type: object
+      properties:
+        error:
+          type: string
+          enum: [validation_error]
+        fields:
+          type: array
+          items: { type: string }
+          description: List of field paths that failed validation
+        detail:
+          type: string
+          description: Human-readable error detail (used when no field list is available)
+
+    SearchError:
+      type: object
+      properties:
+        error:
+          type: string
+          enum: [search_error]
+        detail:
+          type: string
+          description: Elasticsearch error message
+
+    InternalError:
+      type: object
+      properties:
+        error:
+          type: string
+        detail:
+          type: string

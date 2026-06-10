@@ -1,0 +1,4 @@
+fastmcp>=2.0.0
+starlette>=0.40.0
+elasticsearch>=8.15.0
+uvicorn>=0.30.0

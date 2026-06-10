@@ -1,0 +1,130 @@
+{
+  "version": "1.0",
+  "spec_ref": "B4 SPEC v2 §AC-B4.1.5",
+  "decision_ref": "D12 (corrected 2026-06-05 P3a)",
+  "catalog_basis": "stable_v4/data/insurance_products.json (28 products)",
+  "purpose": "Golden labels for Bug J — named-product follow-up intent classification. Each case is a user utterance after a top3 has been recommended; the classifier must resolve to the correct target_product_id.",
+  "intent_enum": ["NAMED_PRODUCT", "ORDINAL", "POLICY_QUESTION", "AMBIGUOUS"],
+  "cases": [
+    {
+      "id": "bug_j_001_exact_match_health",
+      "user_message": "Tell me more about HealthFirst Individual",
+      "top3": ["HLTH003", "HLTH001", "HLTH004"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "HLTH003",
+      "notes": "Exact full-name match. Should resolve at confidence ~1.0."
+    },
+    {
+      "id": "bug_j_002_substring_match",
+      "user_message": "I want to know about HealthFirst",
+      "top3": ["HLTH003", "HLTH001", "HLTH004"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "HLTH003",
+      "notes": "First-word substring. Distinguishable since no other top3 product starts with 'Health'."
+    },
+    {
+      "id": "bug_j_003_case_insensitive",
+      "user_message": "what is heartshield ci plan",
+      "top3": ["CRIT002", "CRIT001", "CRIT003"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "CRIT002",
+      "notes": "All lowercase, no punctuation. Must match HeartShield CI Plan."
+    },
+    {
+      "id": "bug_j_004_typo_one_letter",
+      "user_message": "Tell me about helthfirst",
+      "top3": ["HLTH003", "HLTH001", "HLTH004"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "HLTH003",
+      "notes": "One-letter typo (helthfirst vs HealthFirst). Edit-distance fallback expected. Confidence likely 0.7-0.85."
+    },
+    {
+      "id": "bug_j_005_typo_phonetic",
+      "user_message": "more on cancer care shield",
+      "top3": ["CRIT001", "CRIT002", "CRIT003"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "CRIT001",
+      "notes": "Spaces inserted in name (cancer care vs CancerCare). Tokenization-tolerant match."
+    },
+    {
+      "id": "bug_j_006_ordinal_first",
+      "user_message": "show me the first one",
+      "top3": ["TERM001", "TERM002", "TERM003"],
+      "expected_intent": "ORDINAL",
+      "expected_target_product_id": "TERM001",
+      "notes": "Ordinal — should resolve to top3[0]. Classifier must NOT treat 'first' as a name fragment."
+    },
+    {
+      "id": "bug_j_007_ordinal_word_second",
+      "user_message": "tell me about the second option",
+      "top3": ["TERM001", "TERM002", "TERM003"],
+      "expected_intent": "ORDINAL",
+      "expected_target_product_id": "TERM002",
+      "notes": "Ordinal 'second' resolves to top3[1]."
+    },
+    {
+      "id": "bug_j_008_ordinal_third",
+      "user_message": "the third one please",
+      "top3": ["ULIP001", "ULIP002", "ULIP003"],
+      "expected_intent": "ORDINAL",
+      "expected_target_product_id": "ULIP003",
+      "notes": "Ordinal 'third' resolves to top3[2]."
+    },
+    {
+      "id": "bug_j_009_ambiguous_term_prefix",
+      "user_message": "tell me about Term",
+      "top3": ["TERM001", "TERM002", "TERM003"],
+      "expected_intent": "AMBIGUOUS",
+      "expected_target_product_id": null,
+      "notes": "All three top3 candidates are term_life. Single-word 'Term' matches NONE uniquely. Force-clarify band — confidence < 0.5 expected, classifier should ask for clarification rather than picking one."
+    },
+    {
+      "id": "bug_j_010_pension_named_partial",
+      "user_message": "what about RetireSmart",
+      "top3": ["PENS001", "PENS002", "PENS003"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "PENS001",
+      "notes": "First-word match against RetireSmart Pension. Other PENS products don't share this prefix."
+    },
+    {
+      "id": "bug_j_011_child_plan_compound",
+      "user_message": "tell me about ChildStar",
+      "top3": ["CHLD001", "CHLD002", "CHLD003"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "CHLD001",
+      "notes": "Compound first-word match. ChildStar Future Plan vs other CHLD products."
+    },
+    {
+      "id": "bug_j_012_policy_question",
+      "user_message": "what is critical illness insurance",
+      "top3": ["CRIT001", "CRIT002", "CRIT003"],
+      "expected_intent": "POLICY_QUESTION",
+      "expected_target_product_id": null,
+      "notes": "Generic concept question, NOT a named-product reference. D4 lock: POLICY_QUESTION routes to free-form sub-agent, not B5."
+    },
+    {
+      "id": "bug_j_013_named_with_filler",
+      "user_message": "yeah uh tell me about that LifeGuard one",
+      "top3": ["TERM001", "TERM002", "TERM003"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "TERM002",
+      "notes": "Disfluencies (yeah/uh/that/one). LifeGuard Plus Term should still resolve."
+    },
+    {
+      "id": "bug_j_014_endowment_substring_collision",
+      "user_message": "tell me about money back",
+      "top3": ["ENDT001", "ENDT002", "ENDT003"],
+      "expected_intent": "NAMED_PRODUCT",
+      "expected_target_product_id": "ENDT002",
+      "notes": "Two-word substring. MoneyBack Classic uniquely matches; other ENDT products don't contain 'money back'."
+    },
+    {
+      "id": "bug_j_015_negative_intent_pushback",
+      "user_message": "no I asked for ULIP not term",
+      "top3": ["TERM001", "TERM002", "TERM003"],
+      "expected_intent": "AMBIGUOUS",
+      "expected_target_product_id": null,
+      "notes": "Pushback / wrong-product-type signal. Top3 doesn't contain ULIP — classifier should flag for clarification or trigger re-ranking, NOT pick a TERM product."
+    }
+  ]
+}

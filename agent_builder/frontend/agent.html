@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InsureVoice â€” Premium Sales Recommendation Console</title>
+    
+    <!-- Premium Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Page Styles -->
+    <link rel="stylesheet" href="style.css">
+    <!-- Light Theme Override -->
+    <link rel="stylesheet" href="style_light.css">
+    
+    <!-- INLINE FIX: Force light-theme icon colors (overrides dark theme background-clip:text) -->
+    <style>
+        /* Force brand icon to be blue, no black box */
+        .brand-icon,
+        i.brand-icon,
+        .logo .brand-icon,
+        .logo i.brand-icon {
+            background: transparent !important;
+            background-color: transparent !important;
+            background-image: none !important;
+            -webkit-background-clip: initial !important;
+            background-clip: initial !important;
+            -webkit-text-fill-color: #2563eb !important;
+            color: #2563eb !important;
+            text-shadow: none !important;
+        }
+        
+        /* Force center orb icon to be blue, no black box */
+        .center-orb-icon,
+        i.center-orb-icon,
+        .voice-orb-core .center-orb-icon,
+        .voice-orb-core i.center-orb-icon,
+        .voice-orb-core i.fa-microphone-lines {
+            background: transparent !important;
+            background-color: transparent !important;
+            background-image: none !important;
+            -webkit-background-clip: initial !important;
+            background-clip: initial !important;
+            -webkit-text-fill-color: #2563eb !important;
+            color: #2563eb !important;
+            text-shadow: none !important;
+        }
+    </style>
+    
+    <meta name="invoke-url" content="">
+    <meta name="simulate-url" content="">
+</head>
+<body>
+
+    <!-- Subtle Dynamic Grid/Matrix Background -->
+    <div class="grid-background"></div>
+    <div class="glow-orb glow-orb-1"></div>
+    <div class="glow-orb glow-orb-2"></div>
+
+    <div class="main-wrapper">
+        
+        <!-- Header Branding -->
+        <header class="main-header">
+            <div class="logo">
+                <i class="fa-solid fa-microphone-lines brand-icon" style="color: #2563eb !important; -webkit-text-fill-color: #2563eb !important; background: transparent !important; background-color: transparent !important; background-image: none !important; -webkit-background-clip: initial !important;"></i>
+                <span class="brand-text">Insure<span class="highlight">Voice</span></span>
+            </div>
+            <div class="header-controls">
+                <div class="status-badge">
+                    <span class="status-dot"></span>
+                    <span id="global-status-text">Ready to Connect</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- SCREEN 1: PREPARE SCREEN -->
+        <section id="prepare-screen" class="glass-card active">
+            <div class="section-icon-header">
+                <div class="header-icon-circle">
+                    <i class="fa-solid fa-sliders"></i>
+                </div>
+                <h2>Test Your Microphone</h2>
+                <p class="subtitle">Enable your mic to begin the conversational voice sales agent.</p>
+            </div>
+
+            <div class="prepare-grid">
+                <div class="prepare-controls">
+                    <div class="control-group">
+                        <label for="mic-select"><i class="fa-solid fa-headset icon-label"></i> Select Audio Input Device</label>
+                        <select id="mic-select" class="form-control">
+                            <option value="">Grant Microphone access to list devices...</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
+                        <label><i class="fa-solid fa-volume-high icon-label"></i> Microphone Levels</label>
+                        <div class="db-meter-container">
+                            <div id="db-meter-bar" class="db-meter-fill"></div>
+                            <span class="db-meter-glow"></span>
+                        </div>
+                        <div class="meter-labels">
+                            <span>Quiet</span>
+                            <span>Test levels by speaking...</span>
+                            <span>Loud</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="recorder-test-card">
+                    <h3>3-Second Recording Test <span class="badge">Optional</span></h3>
+                    <p>Record a quick test and listen back to make sure your audio sounds clean and has no echoes.</p>
+                    
+                    <div id="countdown-display" class="recording-timer">03.0s</div>
+
+                    <div class="recorder-buttons">
+                        <button id="btn-record-test" class="btn btn-secondary">
+                            <i class="fa-solid fa-circle icon-btn record-dot"></i> Record
+                        </button>
+                        <button id="btn-play-test" class="btn btn-secondary" disabled>
+                            <i class="fa-solid fa-play icon-btn"></i> Play Back
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="prepare-footer">
+                <p class="bullet-tip"><i class="fa-solid fa-circle-exclamation text-primary"></i> Stand in a quiet space and use headphones to prevent audio feedback loop echo.</p>
+                <button id="btn-start-session" class="btn btn-primary">
+                    <i class="fa-solid fa-microphone"></i> Start Conversation
+                </button>
+            </div>
+        </section>
+
+        <!-- SCREEN 2: ACTIVE VOICE SESSION -->
+        <section id="active-screen" class="glass-card">
+            <div class="active-session-header">
+                <button id="btn-mute" class="btn-icon-control" title="Mute Microphone">
+                    <i class="fa-solid fa-microphone" id="mute-icon"></i>
+                </button>
+                <div class="agent-avatar-wrap">
+                    <span id="session-timer">00:00</span>
+                </div>
+                <button id="btn-end-call" class="btn-icon-control btn-hangup" title="End Conversation">
+                    <i class="fa-solid fa-phone-slash"></i>
+                </button>
+            </div>
+
+            <div class="voice-orb-outer">
+                <div class="voice-orb-container">
+                    <canvas id="orb-canvas" width="220" height="220"></canvas>
+                    <div class="voice-orb-core">
+                        <!-- INLINE STYLE to guarantee no black box -->
+                        <i class="fa-solid fa-microphone-lines center-orb-icon" style="color: #2563eb !important; -webkit-text-fill-color: #2563eb !important; background: transparent !important; background-color: transparent !important; background-image: none !important; -webkit-background-clip: initial !important;"></i>
+                    </div>
+                </div>
+                <div id="orb-status-label" class="orb-state-text">Initializing Agent...</div>
+            </div>
+
+            <div class="live-transcripts-container">
+                <div class="transcript-scroller" id="transcript-scroller">
+                    <div class="bubble bubble-agent animate-bubble">
+                        Hello! I am your InsureVoice Sales Advisor. Speak into your microphone and state your insurance requirements.
+                    </div>
+                </div>
+            </div>
+
+            <div class="recommendations-panel">
+                <div class="rec-panel-header">
+                    <h4><i class="fa-solid fa-wand-magic-sparkles text-primary"></i> Live Product Matches</h4>
+                    <span id="matches-count" class="match-badge">0 Matches</span>
+                </div>
+                
+                <div class="product-cards-slider" id="product-cards-slider">
+                    <div class="slider-placeholder">
+                        <i class="fa-solid fa-comment-dots placeholder-bubble-icon"></i>
+                        <p>Speak to search, rank, and run compliance checks on insurance policies live...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- Simulation Panel -->
+    <section id="simulation-screen" class="simulation-panel glass-card" style="display:none;">
+        <div class="sim-panel-header">
+            <h3><i class="fa-solid fa-calculator text-primary"></i> Premium Simulator</h3>
+            <button id="btn-close-sim" class="btn-icon-control" title="Close Simulator">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+        <div class="sim-form-grid">
+            <div class="sim-field-group">
+                <label for="sim-product-select"><i class="fa-solid fa-shield-halved icon-label"></i> Insurance Plan</label>
+                <select id="sim-product-select" class="form-control">
+                    <option value="">— Select a plan from recommendations —</option>
+                </select>
+            </div>
+            <div class="sim-field-group sim-slider-group">
+                <label for="sim-sum-assured"><i class="fa-solid fa-indian-rupee-sign icon-label"></i> Sum Assured</label>
+                <input type="range" id="sim-sum-assured" class="sim-slider" min="500000" max="50000000" step="500000" value="5000000">
+                <span id="sim-sum-label" class="sim-slider-label">₹50L</span>
+            </div>
+            <div class="sim-field-group">
+                <label for="sim-frequency"><i class="fa-solid fa-calendar-days icon-label"></i> Payment Frequency</label>
+                <select id="sim-frequency" class="form-control">
+                    <option value="monthly" selected>Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                    <option value="semi_annual">Half-Yearly</option>
+                    <option value="annual">Annual</option>
+                </select>
+            </div>
+            <div class="sim-field-group">
+                <label for="sim-policy-term"><i class="fa-solid fa-clock icon-label"></i> Policy Term (years)</label>
+                <select id="sim-policy-term" class="form-control">
+                    <option value="10">10 years</option>
+                    <option value="15" selected>15 years</option>
+                    <option value="20">20 years</option>
+                    <option value="25">25 years</option>
+                    <option value="30">30 years</option>
+                </select>
+            </div>
+        </div>
+        <div id="sim-results-card" class="sim-results-card" style="display:none;">
+            <h4 class="sim-results-title"><i class="fa-solid fa-chart-line text-secondary"></i> Simulation Results</h4>
+            <div class="sim-results-grid">
+                <div class="sim-result-item"><span class="sim-result-label">Period Premium</span><span class="sim-result-value" id="sim-res-period">â€”</span></div>
+                <div class="sim-result-item"><span class="sim-result-label">Annual Premium</span><span class="sim-result-value" id="sim-res-annual">â€”</span></div>
+                <div class="sim-result-item"><span class="sim-result-label">Total Outflow</span><span class="sim-result-value" id="sim-res-total">â€”</span></div>
+                <div class="sim-result-item" id="sim-res-maturity-row"><span class="sim-result-label">Projected Maturity</span><span class="sim-result-value emerald" id="sim-res-maturity">â€”</span></div>
+                <div class="sim-result-item" id="sim-res-gain-row"><span class="sim-result-label">Net Gain</span><span class="sim-result-value emerald" id="sim-res-gain">â€”</span></div>
+            </div>
+            <p class="sim-disclaimer">Figures are illustrative only and subject to underwriting terms.</p>
+        </div>
+        <div id="sim-error-msg" class="sim-error" style="display:none;"></div>
+        <div id="sim-loading" class="sim-loading" style="display:none;"><i class="fa-solid fa-spinner fa-spin"></i> Calculating...</div>
+    </section>
+
+    <button id="btn-open-sim" class="btn-open-sim" title="Open Premium Simulator" style="display:none;">
+        <i class="fa-solid fa-calculator"></i>
+        <span>Simulate Premium</span>
+    </button>
+
+    <button id="btn-toggle-debug" class="btn-debug-toggle" title="Toggle Developer Debug Console">
+        <i class="fa-solid fa-terminal"></i> Debug Info
+    </button>
+    
+    <div id="debug-drawer" class="debug-terminal">
+        <div class="debug-header">
+            <span><i class="fa-solid fa-code"></i> Developer Debug console</span>
+            <button id="btn-clear-debug" class="btn-clear-terminal"><i class="fa-solid fa-trash-can"></i></button>
+        </div>
+        <div class="debug-logs" id="debug-logs-container">
+            <div class="log-line text-muted">[System] Console Initialized. Local Simulation Loaded.</div>
+        </div>
+    </div>
+
+    <!-- Core Script Assets -->
+    <!-- B1 — Chirp 3 HD voice player; publishes window.__voiceAudioCtx on init (D8) -->
+    <script src="voice-player.js"></script>
+    <!-- B2 — STT v2 WebSocket client; loads AudioWorklet from /voice/audio-worklet-processor.js -->
+    <script src="voice/stt-client.js"></script>
+    <!-- Voice simulation + app logic (app_light.js = no auto mic popup on load) -->
+    <script src="simulation.js"></script>
+    <script src="app_light.js"></script>
+</body>
+</html>
+

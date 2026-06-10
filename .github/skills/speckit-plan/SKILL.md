@@ -1,7 +1,6 @@
 ---
 name: speckit-plan
 description: "Generate a detailed implementation plan for a feature spec. Produces specs/NNN-<feature>/plan.md with tech stack, architecture, file layout, and research. Run after /speckit-specify."
-mode: speckit.plan
 argument-hint: "Optional: additional context about tech choices or constraints"
 ---
 
